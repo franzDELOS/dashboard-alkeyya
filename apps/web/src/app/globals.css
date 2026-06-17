@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+/*
+ * Alkeyya brand tokens — the single source of truth the whole dashboard
+ * inherits. Defined here (Tailwind v4 CSS-first config) so utilities like
+ * `bg-paper`, `text-ink`, `text-signal`, `font-display` exist everywhere.
+ */
+@theme {
+  --color-ink: #0e1f33;
+  --color-signal: #2d5bff;
+  --color-paper: #f6f4ef;
+  --color-slate: #5a6675;
+  --color-amber: #e0a23c;
+
+  --font-display: var(--font-fraunces), Georgia, serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+html {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

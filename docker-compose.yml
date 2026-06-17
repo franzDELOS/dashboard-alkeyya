@@ -1,0 +1,56 @@
+# Alkeyya Customer Dashboard — Phase 0 stack.
+# This is a SEPARATE stack from your Twenty CRM / website. Its database is its
+# own instance with its own volume and backup lifecycle.
+
+services:
+  dashboard-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - dashboard_pgdata:/var/lib/postgresql/data
+    # Exposed on 5433 (host) to avoid colliding with other Postgres instances.
+    # Bound to localhost only — never reachable from the public internet.
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  dashboard-api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3020
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@dashboard-postgres:5432/${POSTGRES_DB}?schema=public
+      CORS_ORIGIN: https://app.alkeyya.com
+    depends_on:
+      dashboard-postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3020:3020"
+
+  dashboard-web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # If the web app is hit directly (bypassing Nginx), proxy /api here.
+      API_PROXY_TARGET: http://dashboard-api:3020
+    depends_on:
+      - dashboard-api
+    ports:
+      - "127.0.0.1:3001:3001"
+
+volumes:
+  dashboard_pgdata:

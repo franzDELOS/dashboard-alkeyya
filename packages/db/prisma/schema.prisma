@@ -1,0 +1,17 @@
+// Alkeyya AI — Customer Dashboard
+// Prisma 7 (Rust-free): the `prisma-client` generator emits TypeScript into
+// our source tree, and connectivity goes through a driver adapter (pg).
+//
+// Phase 0 intentionally ships ZERO domain models. Connectivity is proven with
+// a raw `SELECT 1` in the API readiness probe. Auth/billing models land in
+// Phase 1 alongside the first migration.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

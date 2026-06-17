@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -v http://localhost:3020/health)",
+      "Bash(pnpm *)",
+      "Bash(curl http://localhost:3020/health)",
+      "Bash(pkill -f \"tsx watch\")",
+      "Bash(curl *)",
+      "Bash(psql \"postgresql://alkeyya:AOXQyHFbfDThn3/jp/feVgJFkjMvukRlZc8Gef8FwxA=@localhost:5433/alkeyya_dashboard?schema=public\" -c \"SELECT 1\")",
+      "Bash(DATABASE_URL=\"postgresql://alkeyya:AOXQyHFbfDThn3%2Fjp%2FfeVgJFkjMvukRlZc8Gef8FwxA%3D@localhost:5433/alkeyya_dashboard?schema=public\" pnpm db:migrate *)",
+      "Bash(docker-compose down *)",
+      "Bash(docker-compose up *)",
+      "Bash(docker compose *)",
+      "Bash(docker container *)",
+      "Bash(netstat -tlnp)",
+      "Bash(kill 9153)",
+      "Bash(pkill -f \"docker compose\")",
+      "Bash(xargs kill -9)",
+      "Bash(pkill -f \"next dev\")",
+      "Bash(pkill -9 -f \"next\")",
+      "Bash(pkill -9 -f \"tsx\")",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
