@@ -1,8 +1,10 @@
 import express, { type Application, type Request, type Response } from "express";
 import helmet from "helmet";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import { corsOrigins } from "./config/env.js";
 import { healthRouter } from "./routes/health.js";
+import { authRouter } from "./routes/auth.js";
 
 /**
  * Build the Express 5 application. Kept separate from server startup so it can
@@ -24,9 +26,13 @@ export function createApp(): Application {
   );
 
   app.use(express.json({ limit: "1mb" }));
+  app.use(cookieParser());
 
   // Health/readiness probes (no auth).
   app.use("/", healthRouter);
+
+  // Phase 1 authentication (register, login, refresh, verify, reset, etc.).
+  app.use("/auth", authRouter);
 
   // Root: a quiet identifier, not an error.
   app.get("/", (_req: Request, res: Response) => {

@@ -15,3 +15,63 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+// ---- Phase 1: Authentication ------------------------------------------------
+// User accounts plus the short-lived token tables that back email verification,
+// password reset, and rotating refresh-token sessions. We never store raw
+// tokens — only their SHA-256 hashes — so a database leak can't be replayed.
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  passwordHash    String
+  firstName       String?
+  lastName        String?
+  companyName     String?
+  emailVerifiedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  emailVerifications EmailVerification[]
+  passwordResets     PasswordReset[]
+  refreshTokens      RefreshToken[]
+}
+
+model EmailVerification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model PasswordReset {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?
+  userAgent  String?
+  ipAddress  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+}
