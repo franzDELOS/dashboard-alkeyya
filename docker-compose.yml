@@ -27,6 +27,11 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
+    # Load secrets (JWT_*, BREVO_*, STRIPE_*) from the repo .env. The explicit
+    # `environment` block below is applied after env_file and overrides it, so
+    # the container-network DATABASE_URL and production CORS_ORIGIN win.
+    env_file:
+      - .env
     environment:
       NODE_ENV: production
       PORT: 3020

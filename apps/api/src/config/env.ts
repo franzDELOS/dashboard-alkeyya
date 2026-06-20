@@ -32,6 +32,26 @@ const EnvSchema = z
 
     // Public web origin, used to build verification/reset links in emails.
     APP_URL: z.string().url().default("http://localhost:3001"),
+
+    // ---- Phase 2: Stripe billing -------------------------------------------
+    // No defaults: billing must never silently misconfigure. The secret/webhook
+    // keys carry their well-known Stripe prefixes so a swapped key fails fast.
+    STRIPE_SECRET_KEY: z
+      .string()
+      .startsWith("sk_", "STRIPE_SECRET_KEY must start with 'sk_'"),
+    STRIPE_WEBHOOK_SECRET: z
+      .string()
+      .startsWith("whsec_", "STRIPE_WEBHOOK_SECRET must start with 'whsec_'"),
+
+    // Product/Price IDs for the three fixed plans. Seeded into Plan rows; the
+    // API itself reads them only via the database, but they're validated here
+    // so a missing one is caught at boot rather than at seed time.
+    STRIPE_STARTER_PRODUCT_ID: z.string().min(1),
+    STRIPE_STARTER_PRICE_ID: z.string().min(1),
+    STRIPE_PREMIUM_PRODUCT_ID: z.string().min(1),
+    STRIPE_PREMIUM_PRICE_ID: z.string().min(1),
+    STRIPE_GROWTH_PRODUCT_ID: z.string().min(1),
+    STRIPE_GROWTH_PRICE_ID: z.string().min(1),
   })
   .refine((e) => e.JWT_ACCESS_SECRET !== e.JWT_REFRESH_SECRET, {
     message: "JWT_REFRESH_SECRET must differ from JWT_ACCESS_SECRET",

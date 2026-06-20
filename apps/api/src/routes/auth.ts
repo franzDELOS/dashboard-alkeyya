@@ -20,6 +20,11 @@ const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const RESET_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const REFRESH_COOKIE = "refresh_token";
+// The browser only ever talks to the API through the /api proxy (Next.js
+// rewrite in dev, Nginx in prod), so the cookie must be scoped to the path the
+// BROWSER sees — /api/auth — not the backend's internal /auth. Both refresh and
+// logout live under it, so the cookie is sent to exactly those endpoints.
+const REFRESH_COOKIE_PATH = "/api/auth";
 
 // ---- Validation -------------------------------------------------------------
 
@@ -53,14 +58,14 @@ const resetSchema = z.object({
 // ---- Helpers ----------------------------------------------------------------
 
 /** Cookie options for the refresh token. Secure only in production (so local
- *  http dev still receives the cookie). Scoped to /auth so it's only sent to
- *  the refresh/logout endpoints. */
+ *  http dev still receives the cookie). Scoped to the proxied /api/auth path so
+ *  it's only sent to the refresh/logout endpoints the browser actually calls. */
 function refreshCookieOptions() {
   return {
     httpOnly: true,
     secure: env.NODE_ENV === "production",
     sameSite: "strict" as const,
-    path: "/auth",
+    path: REFRESH_COOKIE_PATH,
     maxAge: REFRESH_TTL_MS,
   };
 }
@@ -264,7 +269,7 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
   });
 
   if (!current || current.revokedAt || current.expiresAt < new Date()) {
-    res.clearCookie(REFRESH_COOKIE, { path: "/auth" });
+    res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH });
     return res.status(401).json({ error: "UNAUTHORIZED" });
   }
 
@@ -296,7 +301,7 @@ authRouter.post("/logout", async (req: Request, res: Response) => {
       data: { revokedAt: new Date() },
     });
   }
-  res.clearCookie(REFRESH_COOKIE, { path: "/auth" });
+  res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH });
   return res.status(200).json({ message: "Logged out." });
 });
 

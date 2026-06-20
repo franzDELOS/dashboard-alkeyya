@@ -13,7 +13,8 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // Connection URL lives in prisma.config.ts (Prisma 7 no longer allows `url`
+  // here); the runtime client connects via the pg driver adapter.
 }
 
 // ---- Phase 1: Authentication ------------------------------------------------
@@ -32,9 +33,19 @@ model User {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
+  // ---- Phase 2: Billing ----------------------------------------------------
+  // The pilot gate: a fresh registration is NOT allowed to reach Checkout until
+  // an admin manually flips isPilotApproved (a prospect runs a manual two-week
+  // pilot outside this dashboard first). role distinguishes the founder/admin
+  // (who can approve pilots) from customers.
+  stripeCustomerId String? @unique
+  isPilotApproved  Boolean @default(false)
+  role             String  @default("customer") // "customer" | "admin"
+
   emailVerifications EmailVerification[]
   passwordResets     PasswordReset[]
   refreshTokens      RefreshToken[]
+  subscription       Subscription?
 }
 
 model EmailVerification {
@@ -59,6 +70,64 @@ model PasswordReset {
   createdAt DateTime  @default(now())
 
   @@index([userId])
+}
+
+// ---- Phase 2: Billing -------------------------------------------------------
+// Stripe-backed subscriptions. We mirror just enough of Stripe's state into our
+// own tables to gate dashboard access without a round-trip to Stripe on every
+// request. Stripe remains the source of truth; webhooks keep these rows in sync.
+
+model Plan {
+  id              String   @id @default(cuid())
+  name            String   @unique // "Starter" | "Premium" | "Growth"
+  stripeProductId String   @unique
+  stripePriceId   String   @unique
+  monthlyPriceUsd Int // stored in cents to avoid float issues
+  features        String[]
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                   String    @id @default(cuid())
+  userId               String    @unique // one active subscription per user in this phase
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planId               String
+  plan                 Plan      @relation(fields: [planId], references: [id])
+  stripeSubscriptionId String    @unique
+  status               String // mirrors Stripe: "trialing" | "active" | "past_due" | "suspended" | "canceled"
+  currentPeriodEnd     DateTime?
+  trialEndsAt          DateTime?
+  cancelAtPeriodEnd    Boolean   @default(false)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  invoices Invoice[]
+}
+
+model Invoice {
+  id               String       @id @default(cuid())
+  subscriptionId   String
+  subscription     Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  stripeInvoiceId  String       @unique
+  amountDueCents   Int
+  amountPaidCents  Int
+  status           String // mirrors Stripe: "paid" | "open" | "uncollectible" | "void"
+  hostedInvoiceUrl String?
+  createdAt        DateTime     @default(now())
+
+  @@index([subscriptionId])
+}
+
+// Webhook idempotency ledger: every Stripe event.id is recorded here BEFORE we
+// process it, so a redelivery (Stripe retries on non-2xx / timeout) is skipped.
+model StripeWebhookEvent {
+  id            String   @id @default(cuid())
+  stripeEventId String   @unique
+  type          String
+  processedAt   DateTime @default(now())
 }
 
 model RefreshToken {

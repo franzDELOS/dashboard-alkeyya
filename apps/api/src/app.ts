@@ -5,6 +5,7 @@ import cookieParser from "cookie-parser";
 import { corsOrigins } from "./config/env.js";
 import { healthRouter } from "./routes/health.js";
 import { authRouter } from "./routes/auth.js";
+import { billingRouter } from "./routes/billing.js";
 
 /**
  * Build the Express 5 application. Kept separate from server startup so it can
@@ -25,7 +26,16 @@ export function createApp(): Application {
     })
   );
 
-  app.use(express.json({ limit: "1mb" }));
+  // Parse JSON for every route EXCEPT the Stripe webhook. Stripe signature
+  // verification needs the exact raw request bytes, so /billing/webhook must
+  // never be JSON-parsed here — it uses its own express.raw() in billing.ts.
+  // (Express 5's req.path is the full path at app level; Stripe POSTs to this
+  // exact path with no query string.)
+  const jsonParser = express.json({ limit: "1mb" });
+  app.use((req: Request, res: Response, next: express.NextFunction) => {
+    if (req.path === "/billing/webhook") return next();
+    return jsonParser(req, res, next);
+  });
   app.use(cookieParser());
 
   // Health/readiness probes (no auth).
@@ -33,6 +43,9 @@ export function createApp(): Application {
 
   // Phase 1 authentication (register, login, refresh, verify, reset, etc.).
   app.use("/auth", authRouter);
+
+  // Phase 2 billing (plans, status, embedded checkout, portal, webhook).
+  app.use("/billing", billingRouter);
 
   // Root: a quiet identifier, not an error.
   app.get("/", (_req: Request, res: Response) => {
