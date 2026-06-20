@@ -52,6 +52,13 @@ const EnvSchema = z
     STRIPE_PREMIUM_PRICE_ID: z.string().min(1),
     STRIPE_GROWTH_PRODUCT_ID: z.string().min(1),
     STRIPE_GROWTH_PRICE_ID: z.string().min(1),
+
+    // ---- Phase 3: Request form → n8n ---------------------------------------
+    // Where customer requests are forwarded for downstream automation. Required
+    // (no default) so a misconfigured deploy fails fast at boot rather than
+    // silently dropping the webhook — though the webhook itself is best-effort
+    // at request time (a failed POST never errors the customer's submission).
+    N8N_WEBHOOK_URL: z.string().url(),
   })
   .refine((e) => e.JWT_ACCESS_SECRET !== e.JWT_REFRESH_SECRET, {
     message: "JWT_REFRESH_SECRET must differ from JWT_ACCESS_SECRET",

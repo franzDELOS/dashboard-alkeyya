@@ -6,6 +6,8 @@ import { corsOrigins } from "./config/env.js";
 import { healthRouter } from "./routes/health.js";
 import { authRouter } from "./routes/auth.js";
 import { billingRouter } from "./routes/billing.js";
+import { settingsRouter } from "./routes/settings.js";
+import { requestsRouter } from "./routes/requests.js";
 
 /**
  * Build the Express 5 application. Kept separate from server startup so it can
@@ -46,6 +48,10 @@ export function createApp(): Application {
 
   // Phase 2 billing (plans, status, embedded checkout, portal, webhook).
   app.use("/billing", billingRouter);
+
+  // Phase 3 account settings (profile + password) and support requests.
+  app.use("/settings", settingsRouter);
+  app.use("/requests", requestsRouter);
 
   // Root: a quiet identifier, not an error.
   app.get("/", (_req: Request, res: Response) => {

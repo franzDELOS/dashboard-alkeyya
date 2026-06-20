@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { getAccessToken, setAccessToken } from "../auth-store";
+import { getAccessToken, setAccessToken } from "../../auth-store";
 
 /**
  * Shared helpers for the Phase 2 billing pages. Reuses the Phase 1 in-memory

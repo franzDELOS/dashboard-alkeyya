@@ -134,3 +134,82 @@ export async function sendPasswordResetEmail(
     })
   );
 }
+
+/** Escape a user-supplied value for safe interpolation into the HTML email. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Internal notification to the founder's inbox when a customer submits a
+ * request. Not customer-facing — it's a plain field table (no CTA button), so
+ * it doesn't reuse renderEmail()'s shell. Every interpolated value is escaped:
+ * the subject/message come straight from the customer.
+ */
+export async function sendRequestNotificationEmail(request: {
+  name: string;
+  company: string | null;
+  email: string;
+  subject: string;
+  priority: string;
+  message: string;
+  userId: string;
+  requestId: string;
+}): Promise<void> {
+  const row = (label: string, value: string) => `
+    <tr>
+      <td style="padding:8px 12px;border-bottom:1px solid rgba(14,31,51,0.08);font-family:${SANS};font-size:13px;font-weight:600;color:${INK};white-space:nowrap;vertical-align:top;">${label}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid rgba(14,31,51,0.08);font-family:${SANS};font-size:14px;color:${INK};">${value}</td>
+    </tr>`;
+
+  const messageHtml = escapeHtml(request.message).replace(/\n/g, "<br />");
+
+  const html = `<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background-color:${PAPER};">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${PAPER};padding:32px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:560px;max-width:560px;background-color:#ffffff;border:1px solid rgba(14,31,51,0.08);border-radius:12px;">
+            <tr>
+              <td style="padding:32px 36px;">
+                <div style="font-family:${SERIF};font-size:22px;font-weight:600;color:${INK};letter-spacing:-0.01em;">
+                  <span style="color:${SIGNAL};">◆</span>&nbsp;Alkeyya
+                </div>
+                <h1 style="margin:24px 0 0;font-family:${SERIF};font-size:22px;line-height:1.25;font-weight:600;color:${INK};">
+                  New customer request
+                </h1>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0 0;border-top:1px solid rgba(14,31,51,0.08);">
+                  ${row("Priority", escapeHtml(request.priority.toUpperCase()))}
+                  ${row("Subject", escapeHtml(request.subject))}
+                  ${row("From", escapeHtml(request.name))}
+                  ${row("Email", escapeHtml(request.email))}
+                  ${row("Company", request.company ? escapeHtml(request.company) : "—")}
+                  ${row("Message", messageHtml)}
+                </table>
+                <p style="margin:24px 0 0;font-family:${SANS};font-size:12px;line-height:1.6;color:#5a6675;">
+                  Submitted by user ID: ${escapeHtml(request.userId)}, Request ID: ${escapeHtml(request.requestId)}
+                </p>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:20px 0 0;font-family:${SANS};font-size:12px;color:#5a6675;">
+            Alkeyya AI · Internal request notification.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+
+  await send(
+    "hello@alkeyya.com",
+    `[${request.priority.toUpperCase()}] New request: ${request.subject}`,
+    html
+  );
+}

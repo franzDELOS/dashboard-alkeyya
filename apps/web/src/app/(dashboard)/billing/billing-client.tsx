@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { buttonClass } from "../auth-ui";
+import { buttonClass } from "../../auth-ui";
 import {
   authedFetch,
   BillingShell,

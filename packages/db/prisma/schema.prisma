@@ -46,6 +46,9 @@ model User {
   passwordResets     PasswordReset[]
   refreshTokens      RefreshToken[]
   subscription       Subscription?
+
+  // ---- Phase 3: Support requests -------------------------------------------
+  requests Request[]
 }
 
 model EmailVerification {
@@ -128,6 +131,28 @@ model StripeWebhookEvent {
   stripeEventId String   @unique
   type          String
   processedAt   DateTime @default(now())
+}
+
+// ---- Phase 3: Support requests ----------------------------------------------
+// Customer-submitted requests (support / feature / billing questions). Saved
+// here, emailed to the founder's inbox, and forwarded to n8n (best-effort) for
+// any downstream automation. status is updated out-of-band by the team.
+
+model Request {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  company   String?
+  email     String
+  subject   String
+  priority  String // "low" | "normal" | "high" | "urgent"
+  message   String
+  status    String   @default("open") // "open" | "in_progress" | "resolved" | "closed"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }
 
 model RefreshToken {
