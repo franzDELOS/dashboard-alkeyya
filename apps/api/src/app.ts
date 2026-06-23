@@ -8,6 +8,7 @@ import { authRouter } from "./routes/auth.js";
 import { billingRouter } from "./routes/billing.js";
 import { settingsRouter } from "./routes/settings.js";
 import { requestsRouter } from "./routes/requests.js";
+import { adminRouter } from "./routes/admin.js";
 
 /**
  * Build the Express 5 application. Kept separate from server startup so it can
@@ -52,6 +53,10 @@ export function createApp(): Application {
   // Phase 3 account settings (profile + password) and support requests.
   app.use("/settings", settingsRouter);
   app.use("/requests", requestsRouter);
+
+  // Phase 4 internal admin panel (user/request management, audit log). Every
+  // route inside is gated by requireAuth + requireAdmin.
+  app.use("/admin", adminRouter);
 
   // Root: a quiet identifier, not an error.
   app.get("/", (_req: Request, res: Response) => {

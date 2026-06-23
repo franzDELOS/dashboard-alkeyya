@@ -3,35 +3,43 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { setAccessToken } from "../auth-store";
-import { authedFetch, Keystone } from "./billing/billing-shared";
-import { UserProvider, type User } from "./user-context";
+import { authedFetch, Keystone } from "../(dashboard)/billing/billing-shared";
+import type { User } from "../(dashboard)/user-context";
+import { AdminProvider } from "./admin-context";
 
-/** Sidebar navigation — label + the route it points at. URLs are unaffected by
- *  the (dashboard) route group, so these are the real paths. */
+/** Admin sidebar navigation. URLs are unaffected by the (admin) route group. */
 const NAV = [
-  { label: "Overview", href: "/dashboard" },
-  { label: "Billing", href: "/billing" },
-  { label: "Requests", href: "/requests" },
-  { label: "Settings", href: "/settings" },
+  { label: "Overview", href: "/admin" },
+  { label: "Users", href: "/admin/users" },
+  { label: "Requests", href: "/admin/requests" },
+  { label: "Audit Log", href: "/admin/audit" },
 ] as const;
 
 /** Derive the topnav page title from the current path. */
 function titleFor(pathname: string): string {
-  const match = NAV.find((item) => pathname.startsWith(item.href));
-  return match?.label ?? "Dashboard";
+  if (pathname.startsWith("/admin/users/") && pathname !== "/admin/users") {
+    return "User Detail";
+  }
+  if (pathname.startsWith("/admin/requests/") && pathname !== "/admin/requests") {
+    return "Request Detail";
+  }
+  if (pathname.startsWith("/admin/users")) return "Users";
+  if (pathname.startsWith("/admin/requests")) return "Requests";
+  if (pathname.startsWith("/admin/audit")) return "Audit Log";
+  return "Admin Overview";
 }
 
-export default function DashboardLayout({ children }: { children: ReactNode }) {
+export default function AdminLayout({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const ran = useRef(false);
-  const [user, setUser] = useState<User | null>(null);
+  const [admin, setAdmin] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // Auth guard: fetch /me once on mount. authedFetch() does the silent refresh
-  // internally, so a still-401 here means there's no valid session → login.
+  // Admin guard: fetch /me once on mount. authedFetch() does the silent refresh
+  // internally. A non-ok response means there's no valid session → /login. A
+  // valid-but-non-admin user is sent home to /dashboard.
   useEffect(() => {
     if (ran.current) return;
     ran.current = true;
@@ -39,17 +47,16 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     (async () => {
       try {
         const res = await authedFetch("/api/auth/me");
-        if (res.status === 403) {
-          // Phase 4: the account was suspended — bounce to login with a reason
-          // the login page turns into an explanatory banner.
-          router.replace("/login?reason=suspended");
-          return;
-        }
         if (!res.ok) {
           router.replace("/login");
           return;
         }
-        setUser((await res.json()) as User);
+        const user = (await res.json()) as User;
+        if (user.role !== "admin") {
+          router.replace("/dashboard");
+          return;
+        }
+        setAdmin(user);
       } catch {
         router.replace("/login");
       } finally {
@@ -63,29 +70,19 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     setMenuOpen(false);
   }, [pathname]);
 
-  async function handleLogout() {
-    try {
-      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
-    } finally {
-      setAccessToken(null);
-      router.replace("/login");
-    }
-  }
-
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center p-6">
-        <p className="text-sm text-slate">Loading your account…</p>
+        <p className="text-sm text-slate">Loading…</p>
       </main>
     );
   }
 
-  if (!user) return null; // redirecting
+  if (!admin) return null; // redirecting
 
   return (
-    <UserProvider value={{ user, setUser }}>
+    <AdminProvider value={{ admin }}>
       <div className="min-h-screen md:flex">
-        {/* Backdrop behind the mobile sidebar overlay. */}
         {menuOpen ? (
           <button
             type="button"
@@ -95,12 +92,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           />
         ) : null}
 
-        <Sidebar
-          pathname={pathname}
-          user={user}
-          open={menuOpen}
-          onLogout={handleLogout}
-        />
+        <Sidebar pathname={pathname} admin={admin} open={menuOpen} />
 
         <div className="flex min-w-0 flex-1 flex-col md:pl-64">
           <Topnav
@@ -110,20 +102,18 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           <main className="flex-1 p-6 md:p-10">{children}</main>
         </div>
       </div>
-    </UserProvider>
+    </AdminProvider>
   );
 }
 
 function Sidebar({
   pathname,
-  user,
+  admin,
   open,
-  onLogout,
 }: {
   pathname: string;
-  user: User;
+  admin: User;
   open: boolean;
-  onLogout: () => void;
 }) {
   return (
     <aside
@@ -131,18 +121,24 @@ function Sidebar({
         open ? "translate-x-0" : "-translate-x-full"
       }`}
     >
-      {/* Wordmark */}
-      <div className="flex items-center gap-3 px-6 py-6">
+      {/* Wordmark + Admin badge — the key visual differentiator from the
+          customer view. */}
+      <div className="flex items-center gap-2 px-6 py-6">
         <Keystone />
         <span className="font-display text-2xl tracking-tight text-white">
           Alkeyya
         </span>
+        <span className="rounded-full bg-signal px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+          Admin
+        </span>
       </div>
 
-      {/* Navigation */}
       <nav className="flex-1 px-3 py-2">
         {NAV.map((item) => {
-          const active = pathname.startsWith(item.href);
+          const active =
+            item.href === "/admin"
+              ? pathname === "/admin"
+              : pathname.startsWith(item.href);
           return (
             <Link
               key={item.href}
@@ -159,19 +155,17 @@ function Sidebar({
         })}
       </nav>
 
-      {/* Account footer */}
       <div className="border-t border-white/10 px-6 py-5">
         <p className="truncate text-sm font-medium text-white">
-          {user.firstName ?? "Account"}
+          {admin.firstName ?? "Admin"}
         </p>
-        <p className="mt-0.5 truncate text-xs text-paper/55">{user.email}</p>
-        <button
-          type="button"
-          onClick={onLogout}
-          className="mt-3 text-xs font-medium text-paper/55 underline-offset-2 transition hover:text-white hover:underline"
+        <p className="mt-0.5 truncate text-xs text-paper/55">{admin.email}</p>
+        <Link
+          href="/dashboard"
+          className="mt-3 inline-block text-xs font-medium text-paper/55 underline-offset-2 transition hover:text-white hover:underline"
         >
-          Log out
-        </button>
+          Back to dashboard →
+        </Link>
       </div>
     </aside>
   );
@@ -186,7 +180,6 @@ function Topnav({
 }) {
   return (
     <header className="sticky top-0 z-10 flex h-16 items-center gap-3 border-b border-ink/10 bg-white px-4 md:px-10">
-      {/* Mobile: hamburger + centered wordmark. Desktop: just the title. */}
       <button
         type="button"
         aria-label="Open menu"
@@ -208,11 +201,13 @@ function Topnav({
         <span className="font-display text-lg tracking-tight text-ink">
           Alkeyya
         </span>
+        <span className="rounded-full bg-signal px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-white">
+          Admin
+        </span>
       </div>
 
       <h1 className="hidden font-display text-xl text-ink md:block">{title}</h1>
 
-      {/* Spacer to balance the hamburger so the mobile wordmark stays centered. */}
       <span className="w-9 md:hidden" aria-hidden="true" />
     </header>
   );

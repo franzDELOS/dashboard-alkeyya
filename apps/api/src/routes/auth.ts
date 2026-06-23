@@ -256,6 +256,7 @@ authRouter.post("/login", async (req: Request, res: Response) => {
       firstName: user.firstName,
       lastName: user.lastName,
       companyName: user.companyName,
+      role: user.role,
     },
   });
 });
@@ -389,6 +390,13 @@ authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return res.status(401).json({ error: "UNAUTHORIZED" });
 
+  // Phase 4: a suspended user can still log in, but is blocked from every
+  // authenticated route once their access token is checked here. The dashboard
+  // layout turns this 403 into a redirect to /login?reason=suspended.
+  if (user.suspendedAt) {
+    return res.status(403).json({ error: "ACCOUNT_SUSPENDED" });
+  }
+
   return res.status(200).json({
     id: user.id,
     email: user.email,
@@ -396,5 +404,6 @@ authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
     lastName: user.lastName,
     companyName: user.companyName,
     emailVerifiedAt: user.emailVerifiedAt,
+    role: user.role,
   });
 });

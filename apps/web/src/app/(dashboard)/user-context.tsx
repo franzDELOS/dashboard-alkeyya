@@ -14,6 +14,9 @@ export type User = {
   lastName: string | null;
   companyName: string | null;
   emailVerifiedAt: string | null;
+  // Added in Phase 4: /me now returns the role so the (admin) layout can gate
+  // on it. "customer" | "admin". Existing (dashboard) consumers ignore it.
+  role: string;
 };
 
 type UserContextValue = {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { setAccessToken } from "../auth-store";
@@ -22,6 +22,15 @@ export function LoginForm() {
   const [resendState, setResendState] = useState<"idle" | "sending" | "sent">(
     "idle"
   );
+  const [suspended, setSuspended] = useState(false);
+
+  // Phase 4: the (dashboard) layout redirects suspended users here with
+  // ?reason=suspended. Read it from the URL (via window to avoid a Suspense
+  // boundary requirement on useSearchParams) and show an explanatory banner.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("reason") === "suspended") setSuspended(true);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -51,7 +60,9 @@ export function LoginForm() {
       }
 
       setAccessToken(body.accessToken as string);
-      router.push("/dashboard");
+      // Admins land on the admin panel; everyone else on the customer dashboard.
+      const role = (body.user as { role?: string } | undefined)?.role;
+      router.push(role === "admin" ? "/admin" : "/dashboard");
     } catch {
       setError("Network error. Please try again.");
     } finally {
@@ -74,6 +85,12 @@ export function LoginForm() {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      {suspended ? (
+        <div className="rounded-lg border border-amber/30 bg-amber/5 p-3 text-sm text-ink">
+          Your account has been suspended. Contact support for assistance.
+        </div>
+      ) : null}
+
       <div>
         <label htmlFor="email" className={labelClass}>
           Email

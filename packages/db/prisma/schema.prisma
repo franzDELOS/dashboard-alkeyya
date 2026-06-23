@@ -42,6 +42,11 @@ model User {
   isPilotApproved  Boolean @default(false)
   role             String  @default("customer") // "customer" | "admin"
 
+  // ---- Phase 4: Admin ------------------------------------------------------
+  // null = active, set = suspended. A suspended user can still authenticate at
+  // /login but is blocked from every authenticated route (/me returns 403).
+  suspendedAt DateTime?
+
   emailVerifications EmailVerification[]
   passwordResets     PasswordReset[]
   refreshTokens      RefreshToken[]
@@ -49,6 +54,29 @@ model User {
 
   // ---- Phase 3: Support requests -------------------------------------------
   requests Request[]
+
+  // ---- Phase 4: Admin audit trail ------------------------------------------
+  // Back-reference for AuditLog.actor (the admin who performed an action). Only
+  // one relation exists between User and AuditLog, so no @relation name needed.
+  auditLogs AuditLog[]
+}
+
+// ---- Phase 4: Admin audit trail ---------------------------------------------
+// Every privileged admin action (pilot approval, request status change, user
+// suspension/unsuspension) is recorded here: who did it, what they did, and
+// which resource was affected. Append-only; never updated or deleted.
+model AuditLog {
+  id           String   @id @default(cuid())
+  actorId      String // the admin who performed the action
+  actor        User     @relation(fields: [actorId], references: [id])
+  action       String // "pilot_approved" | "request_status_changed" | "user_suspended" | "user_unsuspended"
+  resourceType String // "user" | "request" | "subscription"
+  resourceId   String // the id of the affected row
+  metadata     Json? // extra context, e.g. { from: "open", to: "in_progress" }
+  createdAt    DateTime @default(now())
+
+  @@index([actorId])
+  @@index([resourceType, resourceId])
 }
 
 model EmailVerification {
