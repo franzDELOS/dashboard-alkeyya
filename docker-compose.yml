@@ -47,10 +47,12 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        # Must match the runtime target — rewrites are compiled at build time.
+        API_PROXY_TARGET: http://dashboard-api:3020
     restart: unless-stopped
     environment:
       NODE_ENV: production
-      # If the web app is hit directly (bypassing Nginx), proxy /api here.
       API_PROXY_TARGET: http://dashboard-api:3020
     depends_on:
       - dashboard-api

@@ -95,7 +95,10 @@ requestsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
   try {
     const response = await fetch(env.N8N_WEBHOOK_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Webhook-Secret": env.N8N_WEBHOOK_SECRET,
+      },
       body: JSON.stringify({
         requestId: request.id,
         userId: user.id,

@@ -59,6 +59,9 @@ const EnvSchema = z
     // silently dropping the webhook — though the webhook itself is best-effort
     // at request time (a failed POST never errors the customer's submission).
     N8N_WEBHOOK_URL: z.string().url(),
+    // Shared secret sent as the `X-Webhook-Secret` header so n8n's Header Auth
+    // credential can reject anything that isn't this dashboard.
+    N8N_WEBHOOK_SECRET: z.string().min(1),
   })
   .refine((e) => e.JWT_ACCESS_SECRET !== e.JWT_REFRESH_SECRET, {
     message: "JWT_REFRESH_SECRET must differ from JWT_ACCESS_SECRET",

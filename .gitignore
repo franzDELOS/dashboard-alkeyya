@@ -22,3 +22,6 @@ npm-debug.log*
 
 # os
 .DS_Store
+
+# text
+cookies.txt

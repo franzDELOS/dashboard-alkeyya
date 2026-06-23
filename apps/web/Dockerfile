@@ -17,6 +17,10 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 
 # ---- Build (Next standalone) -----------------------------------------------
 FROM deps AS build
+# Rewrites in next.config.ts are compiled at build time, so the proxy target
+# must be available here — not just as a runtime env var.
+ARG API_PROXY_TARGET=http://localhost:3020
+ENV API_PROXY_TARGET=$API_PROXY_TARGET
 COPY apps/web apps/web
 RUN pnpm -F @alkeyya/web build
 
