@@ -3,6 +3,7 @@ import helmet from "helmet";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { corsOrigins } from "./config/env.js";
+import { apiLimiter } from "./lib/rate-limit.js";
 import { healthRouter } from "./routes/health.js";
 import { authRouter } from "./routes/auth.js";
 import { billingRouter } from "./routes/billing.js";
@@ -17,9 +18,34 @@ import { adminRouter } from "./routes/admin.js";
 export function createApp(): Application {
   const app = express();
 
-  // Security headers. We start strict; CSP/HSTS get tuned in Phase 5 once the
-  // real frontend asset origins are known.
-  app.use(helmet());
+  // We sit behind Nginx (one proxy hop). Trust exactly that one hop so
+  // `req.ip` and the rate limiter read the real client IP from the LAST entry
+  // of X-Forwarded-For — not Nginx's 127.0.0.1. Without this, every request
+  // looks like it comes from the proxy and the rate limiter would throttle all
+  // users at once. Must run before any IP-dependent middleware.
+  app.set("trust proxy", 1);
+
+  // Security headers. The API serves only JSON (no HTML/scripts/images), so the
+  // CSP can be maximally strict. HSTS for the public web app is owned by Nginx
+  // (Phase 5); the short max-age here is belt-and-suspenders for the unlikely
+  // case anything ever hits the API origin directly in a browser.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'none'"],
+          frameAncestors: ["'none'"],
+        },
+      },
+      hsts: {
+        maxAge: 60 * 60 * 24 * 365, // 1 year for the API
+        includeSubDomains: false,
+      },
+      crossOriginEmbedderPolicy: false,
+      crossOriginOpenerPolicy: false,
+      crossOriginResourcePolicy: { policy: "same-origin" },
+    })
+  );
 
   // Only allow the known web origin(s) to call the API from a browser.
   app.use(
@@ -28,6 +54,15 @@ export function createApp(): Application {
       credentials: true,
     })
   );
+
+  // Global rate limit: 60 req/min/IP across every route, as a baseline DoS
+  // guard on top of the tighter per-endpoint auth limiters. The Stripe webhook
+  // is exempt — Stripe retries from an unpredictable IP range and must never be
+  // throttled (same carve-out as the JSON parser below).
+  app.use((req: Request, res: Response, next: express.NextFunction) => {
+    if (req.path === "/billing/webhook") return next();
+    return apiLimiter(req, res, next);
+  });
 
   // Parse JSON for every route EXCEPT the Stripe webhook. Stripe signature
   // verification needs the exact raw request bytes, so /billing/webhook must

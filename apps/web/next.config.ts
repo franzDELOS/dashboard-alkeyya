@@ -18,6 +18,40 @@ try {
 const API_PROXY_TARGET =
   process.env.API_PROXY_TARGET ?? "http://localhost:3020";
 
+// Content-Security-Policy for the web app. Built as an explicit allowlist.
+// NOTE the Stripe origins: js.stripe.com must appear in BOTH script-src AND
+// frame-src — the embedded Checkout renders its card form in an iframe served
+// from js.stripe.com, and omitting it from frame-src silently breaks Checkout
+// with no console error. api.stripe.com is needed in connect-src for Stripe.js
+// network calls. 'unsafe-inline' on script/style is required by Next.js
+// hydration and Tailwind's inline styles respectively.
+const contentSecurityPolicy = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' https://js.stripe.com",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' https://fonts.gstatic.com",
+  "connect-src 'self' https://api.stripe.com",
+  "frame-src https://js.stripe.com",
+  "frame-ancestors 'none'",
+  "object-src 'none'",
+  "base-uri 'self'",
+].join("; ");
+
+// Security headers applied to every response. HSTS is intentionally absent here
+// — it is owned solely by Nginx (Phase 5) so there is one place to manage the
+// two-year commitment.
+const securityHeaders = [
+  { key: "Content-Security-Policy", value: contentSecurityPolicy },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  {
+    key: "Permissions-Policy",
+    value: "camera=(), microphone=(), geolocation=()",
+  },
+];
+
 const nextConfig: NextConfig = {
   output: "standalone",
   reactStrictMode: true,
@@ -26,6 +60,14 @@ const nextConfig: NextConfig = {
       {
         source: "/api/:path*",
         destination: `${API_PROXY_TARGET}/:path*`,
+      },
+    ];
+  },
+  async headers() {
+    return [
+      {
+        source: "/(.*)",
+        headers: securityHeaders,
       },
     ];
   },

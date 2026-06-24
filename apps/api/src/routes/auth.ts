@@ -10,6 +10,7 @@ import {
 } from "../lib/tokens.js";
 import { sendVerificationEmail, sendPasswordResetEmail } from "../lib/email.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { authLimiter, strictLimiter } from "../lib/rate-limit.js";
 import crypto from "crypto";
 
 export const authRouter: Router = Router();
@@ -97,8 +98,7 @@ async function issueRefreshToken(
 
 // ---- Routes -----------------------------------------------------------------
 
-// TODO: rate limit in Phase 5.
-authRouter.post("/register", async (req: Request, res: Response) => {
+authRouter.post("/register", authLimiter, async (req: Request, res: Response) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) return badRequest(res, parsed.error);
 
@@ -178,8 +178,10 @@ authRouter.post("/verify-email", async (req: Request, res: Response) => {
     .json({ message: "Email verified. You can now log in." });
 });
 
-// TODO: rate limit in Phase 5.
-authRouter.post("/resend-verification", async (req: Request, res: Response) => {
+authRouter.post(
+  "/resend-verification",
+  authLimiter,
+  async (req: Request, res: Response) => {
   const parsed = emailOnlySchema.safeParse(req.body);
   if (!parsed.success) return badRequest(res, parsed.error);
 
@@ -213,11 +215,11 @@ authRouter.post("/resend-verification", async (req: Request, res: Response) => {
     await sendVerificationEmail(user.email, user.firstName, rawToken);
   }
 
-  return res.status(200).json(genericMessage);
-});
+    return res.status(200).json(genericMessage);
+  }
+);
 
-// TODO: rate limit in Phase 5.
-authRouter.post("/login", async (req: Request, res: Response) => {
+authRouter.post("/login", authLimiter, async (req: Request, res: Response) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return badRequest(res, parsed.error);
 
@@ -306,8 +308,11 @@ authRouter.post("/logout", async (req: Request, res: Response) => {
   return res.status(200).json({ message: "Logged out." });
 });
 
-// TODO: rate limit in Phase 5.
-authRouter.post("/forgot-password", async (req: Request, res: Response) => {
+authRouter.post(
+  "/forgot-password",
+  strictLimiter,
+  authLimiter,
+  async (req: Request, res: Response) => {
   const parsed = emailOnlySchema.safeParse(req.body);
   if (!parsed.success) return badRequest(res, parsed.error);
 
@@ -343,8 +348,9 @@ authRouter.post("/forgot-password", async (req: Request, res: Response) => {
     }
   }
 
-  return res.status(200).json(genericMessage);
-});
+    return res.status(200).json(genericMessage);
+  }
+);
 
 authRouter.post("/reset-password", async (req: Request, res: Response) => {
   const parsed = resetSchema.safeParse(req.body);

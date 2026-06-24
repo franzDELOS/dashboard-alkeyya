@@ -10,6 +10,8 @@
     "setup": "pnpm install && pnpm db:generate && pnpm -F @alkeyya/db build",
     "db:generate": "pnpm -F @alkeyya/db generate",
     "db:migrate": "pnpm -F @alkeyya/db migrate",
+    "db:deploy": "pnpm -F @alkeyya/db migrate:deploy",
+    "db:seed": "pnpm -F @alkeyya/db seed",
     "db:studio": "pnpm -F @alkeyya/db studio",
     "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
     "build": "pnpm -F @alkeyya/db build && pnpm -F @alkeyya/api build && pnpm -F @alkeyya/web build",
