@@ -8,14 +8,18 @@
 // Env lives in the monorepo root .env (same file the API loads), so we load it
 // explicitly here rather than relying on Prisma's CWD-relative .env discovery.
 
+// `import "dotenv/config"` MUST be the first import. Static imports are hoisted
+// and evaluated in declaration order before any inline code runs, so loading the
+// environment here guarantees DATABASE_URL is populated before "../src/index.js"
+// evaluates src/client.ts (which constructs the PrismaClient from process.env).
+import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
+import { prisma } from "../src/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
-
-const { PrismaClient } = await import("../src/generated/prisma/client.js");
 
 /** Read a required env var or collect it into the missing list. */
 const missing: string[] = [];
@@ -86,8 +90,6 @@ if (missing.length > 0) {
   );
   process.exit(1);
 }
-
-const prisma = new PrismaClient();
 
 async function main() {
   for (const plan of plans) {
