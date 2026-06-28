@@ -325,5 +325,119 @@ Confirmed against `node_modules` types; differences from this phase's assumption
 ### Explicitly NOT in Phase 3
 - No schema/migration changes; no Stripe removal; no usage/overage metering; no admin
   sidebar nav wiring; no Stripe-side equivalents of the trial/refund controls.
+
+---
+
+## Phase 4 — subscriber billing-status badges + usage/overage tracking (ADDITIVE ONLY)
+
+> Constraint check: auth, the Stripe flow, and every existing admin route stay
+> untouched. New usage endpoint + additive response fields + a new schema model are
+> layered next to today's code. `logAudit()` is reused exactly as-is. All money is
+> integer cents; overage is computed for display only (no charge is issued here).
+
+### A. Schema — new `UsageRecord` model (`packages/db/prisma/schema.prisma`)
+- Add `model UsageRecord { id, userId, period "YYYY-MM", calls Int, ingestedAt, updatedAt,
+  user → User onDelete: Cascade, @@unique([userId, period]) }`. The unique constraint
+  gives idempotency: one row per user per month, corrected via upsert.
+- Add `usageRecords UsageRecord[]` back-relation to `User`.
+- Migration name **`add_usage_records`** (`pnpm db:migrate`).
+
+### B. API — usage ingestion (`apps/api/src/routes/admin.ts`)
+- New `POST /admin/users/:userId/usage`. Zod body
+  `{ calls: int ≥ 0, period?: /^\d{4}-\d{2}$/ }`; `period` defaults to the current
+  month (`YYYY-MM`, UTC).
+- Load user (404 if missing) with its subscription → plan; if no subscription or no
+  plan → **422 `NO_SUBSCRIPTION`** ("User has no active subscription.").
+- `prisma.usageRecord.upsert` on `@@unique([userId, period])` (create with `calls`,
+  or update `calls` on an existing period). Detect created-vs-updated by checking for
+  an existing row first, so we can return `{ created: boolean }`.
+- Polar event ingestion (best-effort): only when the user has `polarCustomerId` **and**
+  the plan has `polarMeterId` set. Wrapped in try/catch — a Polar failure logs but
+  still saves the local record and returns 200 (local record is source of truth). If
+  `polarMeterId` is null (Premium) → skip Polar entirely.
+- `logAudit({ action: "usage_recorded", resourceType: "user", resourceId: userId,
+  metadata: { calls, period, polarIngested } })`.
+- Returns `{ usageRecord: { id, userId, period, calls, ingestedAt }, created }`.
+
+### C. API — extend `GET /admin/users/:userId` (`apps/api/src/routes/admin.ts`)
+- Additive only: add `usageRecords` (last 6 by `period` desc; select
+  `id, period, calls, ingestedAt`) and add `includedCalls`, `overageUnitCents` to the
+  existing `subscription.plan` select, surfaced on the returned `subscription` object.
+  Nothing already returned changes.
+
+### D. API — extend `GET /admin/users` (`apps/api/src/routes/admin.ts`)
+- `subscription.status` is **already** returned per row (confirmed, line ~130) — no
+  change needed there.
+- Add a `billingStatus` query param, AND-combined with the existing `status` filter:
+  `billing_active` → `subscription.is.status = "active"`, `billing_trialing` →
+  trialing, `billing_past_due` → past_due, `billing_none` → `subscription is null`.
+  `billing_all`/absent → no billing filter.
+
+### E. Web — billing column + filter tabs (`apps/web/.../admin/users/page.tsx`)
+- `UserRow.subscription` already carries `status`; render a `SubscriptionStatusBadge`
+  (already exported from `admin-shared.tsx`) in a new **Billing status** column placed
+  between Plan and Status. No subscription → subtle `text-xs text-slate` "None".
+- Second row of filter chips labelled **Billing** (existing four account tabs stay as a
+  first row, unchanged): All billing (`billing_all`), Subscribed (`billing_active`),
+  In trial (`billing_trialing`), Past due (`billing_past_due`), No subscription
+  (`billing_none`). New `billing` state, reset to page 1 on change, passed as
+  `billingStatus` query param. Bump the empty-state `colSpan` 6 → 7.
+
+### F. Web — Usage & Overage panel (`apps/web/.../admin/users/[userId]/page.tsx`)
+- `UserDetail.subscription` gains `includedCalls: number | null`,
+  `overageUnitCents: number | null`; add top-level
+  `usageRecords: Array<{ id; period; calls; ingestedAt }>`.
+- New "Usage & Overage" section after Subscription, rendered only when
+  `user.subscription` exists. Premium (`includedCalls === null`) → single line
+  "Unlimited plan — no overage charges." Otherwise: current-period label, a record-usage
+  form (calls number input + editable period input defaulting to current month +
+  "Record usage" button POSTing `/api/admin/users/:userId/usage`, inline "Recorded." on
+  success then reload), and a last-6 table: Period / Calls / Included / Projected
+  overage / Submitted, where projected overage =
+  `max(0, calls − includedCalls) × overageUnitCents` in dollars (`—` if
+  `overageUnitCents` null). Reuses card style, `inputClass`, `buttonClass`,
+  `successClass`, `errorClass`.
+
+### Polar SDK shapes — verified against `@polar-sh/sdk@0.48.1` (deviations noted)
+The prompt assumed `polar.events.ingest` / `polar.meters.ingest` taking a single event
+with fields `(name, externalCustomerId|customerId, metadata, quantity)`. Verified
+against installed types — actual shape differs:
+- **Method is `polar.events.ingest(request: EventsIngest)`** (not `meters.ingest`;
+  `meters` has no ingest — only list/create/get/update/quantities).
+- **It is a BATCH wrapper, not a single event:** `EventsIngest = { events:
+  Array<EventCreateCustomer | EventCreateExternalCustomer> }`. We send a one-element
+  array.
+- **No `quantity` field exists on an event.** `EventCreateCustomer` =
+  `{ name, customerId, metadata?, timestamp?, externalId?, organizationId?, … }`;
+  `EventCreateExternalCustomer` is the same but with `externalCustomerId`. Polar meters
+  aggregate over an event-`name` + a numeric **metadata** field — so the call count is
+  passed as `metadata.calls` (number), not a `quantity` arg. `EventMetadataInput`
+  accepts `string | number | boolean`.
+- We store Polar's internal customer id in `user.polarCustomerId`, so we use
+  `EventCreateCustomer` with **`customerId`** (the external-id variant is for your-own
+  ids).
+- `organizationId` is optional "unless you use an organization token" — our token is
+  org-scoped (as in Phases 2–3), so we leave it unset.
+- **Event name:** the SDK ingests by event `name`; `polarMeterId` is stored on the plan
+  but is **not** an argument to `events.ingest` (meters filter events server-side). We
+  use a constant event name `USAGE_EVENT_NAME = "api_call"` and gate ingestion on
+  `polarMeterId` being set (i.e. "metering is configured for this plan"). `period` is
+  also included in metadata for traceability. Ingestion stays best-effort per the task.
+
+### Files Phase 4 will touch
+- `packages/db/prisma/schema.prisma` — `UsageRecord` model + `User.usageRecords`.
+- `packages/db/prisma/migrations/*_add_usage_records/` — **new** migration.
+- `apps/api/src/routes/admin.ts` — `POST …/usage`; `billingStatus` filter on
+  `GET /users`; `usageRecords` + `includedCalls`/`overageUnitCents` on `GET /users/:id`.
+- `apps/web/src/app/(admin)/admin/users/page.tsx` — billing column + filter tabs.
+- `apps/web/src/app/(admin)/admin/users/[userId]/page.tsx` — Usage & Overage panel.
+- `POLAR_MIGRATION_PLAN.md` — this section.
+- (No change to `admin-shared.tsx` — `SubscriptionStatusBadge` already exists; no change
+  to `auth-ui.ts` — classes already exist.)
+
+### Explicitly NOT in Phase 4
+- No actual overage charge/invoice (display-only projection); no Stripe-side usage; no
+  customer-facing usage UI; no Polar meter creation/wiring (`polarMeterId` is just a
+  gate); no schema changes beyond `UsageRecord`.
 </content>
 </invoke>

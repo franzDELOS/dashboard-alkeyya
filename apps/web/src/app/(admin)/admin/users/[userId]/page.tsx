@@ -56,6 +56,13 @@ type AuditRow = {
   createdAt: string;
 };
 
+type UsageRecord = {
+  id: string;
+  period: string;
+  calls: number;
+  ingestedAt: string;
+};
+
 type UserDetail = {
   id: string;
   email: string;
@@ -75,11 +82,21 @@ type UserDetail = {
     currentPeriodEnd: string | null;
     trialEndsAt: string | null;
     cancelAtPeriodEnd: boolean;
+    includedCalls: number | null;
+    overageUnitCents: number | null;
     invoices: Invoice[];
   } | null;
+  usageRecords: UsageRecord[];
   requests: RequestRow[];
   recentAuditLogs: AuditRow[];
 };
+
+/** Current month as "YYYY-MM" (UTC) — the default usage period. */
+function currentPeriod(): string {
+  const now = new Date();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${now.getUTCFullYear()}-${month}`;
+}
 
 export default function UserDetailPage() {
   const params = useParams();
@@ -95,6 +112,10 @@ export default function UserDetailPage() {
   const [refundFor, setRefundFor] = useState<string | null>(null);
   const [refundAmount, setRefundAmount] = useState("");
   const [refundReason, setRefundReason] = useState("");
+
+  // Usage entry form (Phase 4): record a month's call count for overage.
+  const [usageCalls, setUsageCalls] = useState("");
+  const [usagePeriod, setUsagePeriod] = useState(currentPeriod());
 
   const load = useCallback(async () => {
     setError(null);
@@ -204,6 +225,23 @@ export default function UserDetailPage() {
       setRefundAmount("");
       setRefundReason("");
       await loadOrders();
+    }
+  }
+
+  async function recordUsage() {
+    const calls = Number(usageCalls);
+    if (!Number.isInteger(calls) || calls < 0) {
+      setError("Enter a whole number of calls (0 or more).");
+      return;
+    }
+    if (!/^\d{4}-\d{2}$/.test(usagePeriod)) {
+      setError("Enter a period as YYYY-MM.");
+      return;
+    }
+    if (await actBody("usage", { calls, period: usagePeriod })) {
+      setMessage("Recorded.");
+      setUsageCalls("");
+      await load();
     }
   }
 
@@ -511,6 +549,104 @@ export default function UserDetailPage() {
         ) : null}
       </section>
 
+      {/* Usage & Overage — only for subscribed users. */}
+      {user.subscription ? (
+        <section className="rounded-xl border border-ink/10 bg-white p-6 shadow-sm">
+          <h2 className="font-display text-lg text-ink">Usage &amp; Overage</h2>
+          {user.subscription.includedCalls === null ? (
+            <p className="mt-4 text-sm text-slate">
+              Unlimited plan — no overage charges.
+            </p>
+          ) : (
+            <div className="mt-4 space-y-5">
+              <p className="text-xs text-slate">
+                Current period:{" "}
+                <span className="font-medium text-ink">{currentPeriod()}</span> ·
+                Included calls:{" "}
+                <span className="font-medium text-ink">
+                  {user.subscription.includedCalls}
+                </span>
+              </p>
+
+              {/* Record-usage form. */}
+              <div className="rounded-lg border border-ink/10 bg-paper/50 p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-slate">
+                  Record usage
+                </p>
+                <div className="mt-3 flex flex-wrap items-end gap-3">
+                  <div>
+                    <label className="text-xs text-slate">
+                      Total calls this month
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      className={`${inputClass} w-40`}
+                      value={usageCalls}
+                      onChange={(e) => setUsageCalls(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate">Period (YYYY-MM)</label>
+                    <input
+                      type="text"
+                      className={`${inputClass} w-32`}
+                      value={usagePeriod}
+                      onChange={(e) => setUsagePeriod(e.target.value)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={recordUsage}
+                    className={`${buttonClass} w-auto px-4`}
+                  >
+                    Record usage
+                  </button>
+                </div>
+              </div>
+
+              {/* Past usage records (last 6). */}
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-slate">
+                  Recent usage
+                </p>
+                {user.usageRecords.length === 0 ? (
+                  <p className="mt-2 text-sm text-slate">No usage recorded yet.</p>
+                ) : (
+                  <div className="mt-2 overflow-x-auto">
+                    <table className="w-full min-w-[520px] text-left text-sm">
+                      <thead className="text-xs uppercase tracking-wide text-slate">
+                        <tr>
+                          <th className="py-2 pr-3 font-medium">Period</th>
+                          <th className="py-2 pr-3 font-medium">Calls</th>
+                          <th className="py-2 pr-3 font-medium">Included</th>
+                          <th className="py-2 pr-3 font-medium">
+                            Projected overage
+                          </th>
+                          <th className="py-2 font-medium">Submitted</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-ink/10">
+                        {user.usageRecords.map((rec) => (
+                          <UsageRow
+                            key={rec.id}
+                            record={rec}
+                            includedCalls={user.subscription!.includedCalls}
+                            overageUnitCents={user.subscription!.overageUnitCents}
+                          />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      ) : null}
+
       {/* Requests */}
       <section className="rounded-xl border border-ink/10 bg-white p-6 shadow-sm">
         <h2 className="font-display text-lg text-ink">Requests</h2>
@@ -566,6 +702,34 @@ export default function UserDetailPage() {
         )}
       </section>
     </div>
+  );
+}
+
+function UsageRow({
+  record,
+  includedCalls,
+  overageUnitCents,
+}: {
+  record: UsageRecord;
+  includedCalls: number | null;
+  overageUnitCents: number | null;
+}) {
+  // Projected overage = max(0, calls − included) × unit cents, shown as dollars.
+  // includedCalls is non-null here (Premium is handled before this table), but
+  // overageUnitCents may be null → no overage charge to show.
+  let overage = "—";
+  if (overageUnitCents !== null && includedCalls !== null) {
+    const overageCalls = Math.max(0, record.calls - includedCalls);
+    overage = formatPriceUsd(overageCalls * overageUnitCents).replace("/mo", "");
+  }
+  return (
+    <tr>
+      <td className="py-2 pr-3 text-ink">{record.period}</td>
+      <td className="py-2 pr-3 text-ink">{record.calls}</td>
+      <td className="py-2 pr-3 text-slate">{includedCalls ?? "—"}</td>
+      <td className="py-2 pr-3 text-ink">{overage}</td>
+      <td className="py-2 text-xs text-slate">{formatDate(record.ingestedAt)}</td>
+    </tr>
   );
 }
 

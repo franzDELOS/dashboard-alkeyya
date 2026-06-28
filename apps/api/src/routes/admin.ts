@@ -67,6 +67,8 @@ adminRouter.get("/users", async (req: Request, res: Response) => {
   const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
   const status =
     typeof req.query.status === "string" ? req.query.status : "all";
+  const billingStatus =
+    typeof req.query.billingStatus === "string" ? req.query.billingStatus : "billing_all";
   const page = pageFrom(req.query.page);
   const limit = limitFrom(req.query.limit, 20, 50);
 
@@ -89,6 +91,19 @@ adminRouter.get("/users", async (req: Request, res: Response) => {
   } else if (status === "pending_approval") {
     where.suspendedAt = null;
     where.isPilotApproved = false;
+  }
+
+  // Billing filter (AND-combined with the account-status filter above). The
+  // first three map to a subscription status; billing_none means no sub row.
+  const SUB_STATUS_BY_BILLING: Record<string, string> = {
+    billing_active: "active",
+    billing_trialing: "trialing",
+    billing_past_due: "past_due",
+  };
+  if (billingStatus === "billing_none") {
+    where.subscription = { is: null };
+  } else if (SUB_STATUS_BY_BILLING[billingStatus]) {
+    where.subscription = { is: { status: SUB_STATUS_BY_BILLING[billingStatus] } };
   }
 
   const [total, users] = await Promise.all([
@@ -163,7 +178,11 @@ adminRouter.get("/users/:userId", async (req: Request, res: Response) => {
           currentPeriodEnd: true,
           trialEndsAt: true,
           cancelAtPeriodEnd: true,
-          plan: { select: { name: true } },
+          // includedCalls/overageUnitCents drive the usage & overage panel in
+          // the web UI (null includedCalls = unlimited/Premium, no overage).
+          plan: {
+            select: { name: true, includedCalls: true, overageUnitCents: true },
+          },
           invoices: {
             orderBy: { createdAt: "desc" },
             select: {
@@ -189,6 +208,12 @@ adminRouter.get("/users/:userId", async (req: Request, res: Response) => {
           status: true,
           createdAt: true,
         },
+      },
+      // Last 6 months of recorded usage, newest first, for the overage panel.
+      usageRecords: {
+        orderBy: { period: "desc" },
+        take: 6,
+        select: { id: true, period: true, calls: true, ingestedAt: true },
       },
     },
   });
@@ -228,9 +253,12 @@ adminRouter.get("/users/:userId", async (req: Request, res: Response) => {
           currentPeriodEnd: user.subscription.currentPeriodEnd,
           trialEndsAt: user.subscription.trialEndsAt,
           cancelAtPeriodEnd: user.subscription.cancelAtPeriodEnd,
+          includedCalls: user.subscription.plan.includedCalls,
+          overageUnitCents: user.subscription.plan.overageUnitCents,
           invoices: user.subscription.invoices,
         }
       : null,
+    usageRecords: user.usageRecords,
     requests: user.requests,
     recentAuditLogs,
   });
@@ -320,6 +348,115 @@ adminRouter.post(
     });
 
     return res.status(200).json({ message: "User unsuspended." });
+  }
+);
+
+// ---- Usage metering (Polar migration) --------------------------------------
+
+// The event name Polar meters aggregate over. The SDK's events.ingest takes a
+// batch of events identified by `name` + numeric `metadata` (there is no
+// `quantity` arg); the plan's polarMeterId is only used as a gate that metering
+// is configured. The call count is passed as metadata.calls.
+const USAGE_EVENT_NAME = "api_call";
+
+/** Current month as "YYYY-MM" (UTC), the default usage period. */
+function currentPeriod(): string {
+  const now = new Date();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${now.getUTCFullYear()}-${month}`;
+}
+
+const usageSchema = z.object({
+  calls: z.number().int().min(0),
+  period: z
+    .string()
+    .regex(/^\d{4}-\d{2}$/, "period must be YYYY-MM")
+    .optional(),
+});
+
+// POST /admin/users/:userId/usage — record (or correct) a month's call count.
+adminRouter.post(
+  "/users/:userId/usage",
+  async (req: Request, res: Response) => {
+    const userId = req.params.userId as string;
+    const parsed = usageSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: "calls must be a non-negative integer; period must be YYYY-MM" });
+    }
+    const { calls } = parsed.data;
+    const period = parsed.data.period ?? currentPeriod();
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        polarCustomerId: true,
+        subscription: {
+          select: {
+            plan: { select: { polarMeterId: true } },
+          },
+        },
+      },
+    });
+    if (!user) return res.status(404).json({ error: "USER_NOT_FOUND" });
+    if (!user.subscription) {
+      return res.status(422).json({
+        error: "NO_SUBSCRIPTION",
+        message: "User has no active subscription.",
+      });
+    }
+
+    // Idempotency: a record for this period is corrected in place (upsert on the
+    // @@unique([userId, period])). Look it up first so we can report created vs
+    // updated to the caller.
+    const existing = await prisma.usageRecord.findUnique({
+      where: { userId_period: { userId, period } },
+      select: { id: true },
+    });
+
+    const usageRecord = await prisma.usageRecord.upsert({
+      where: { userId_period: { userId, period } },
+      create: { userId, period, calls },
+      update: { calls },
+      select: { id: true, userId: true, period: true, calls: true, ingestedAt: true },
+    });
+
+    // Best-effort Polar ingestion: only when the customer exists in Polar AND the
+    // plan has a meter configured. A failure here never fails the request — the
+    // local UsageRecord is the source of truth.
+    let polarIngested = false;
+    const polarMeterId = user.subscription.plan.polarMeterId;
+    if (user.polarCustomerId && polarMeterId) {
+      try {
+        await polar.events.ingest({
+          events: [
+            {
+              name: USAGE_EVENT_NAME,
+              customerId: user.polarCustomerId,
+              metadata: { calls, period },
+            },
+          ],
+        });
+        polarIngested = true;
+      } catch (err) {
+        console.error(
+          `[admin] Polar usage ingestion failed for user ${userId} (period ${period}):`,
+          err
+        );
+      }
+    }
+
+    await logAudit({
+      actorId: req.userId as string,
+      action: "usage_recorded",
+      resourceType: "user",
+      resourceId: userId,
+      metadata: { calls, period, polarIngested },
+    });
+
+    return res.status(200).json({ usageRecord, created: existing === null });
   }
 );
 

@@ -4,7 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { authedFetch, formatDate } from "../../../(dashboard)/billing/billing-shared";
 import { errorClass, inputClass, linkClass } from "../../../auth-ui";
-import { UserStatusBadge, displayName } from "../../admin-shared";
+import {
+  SubscriptionStatusBadge,
+  UserStatusBadge,
+  displayName,
+} from "../../admin-shared";
 
 type UserRow = {
   id: string;
@@ -25,10 +29,21 @@ const TABS = [
   { value: "suspended", label: "Suspended" },
 ] as const;
 
+// Billing-status filter (a second row of chips). Combines with the account
+// status tabs above via AND on the server.
+const BILLING_TABS = [
+  { value: "billing_all", label: "All billing" },
+  { value: "billing_active", label: "Subscribed" },
+  { value: "billing_trialing", label: "In trial" },
+  { value: "billing_past_due", label: "Past due" },
+  { value: "billing_none", label: "No subscription" },
+] as const;
+
 export default function AdminUsersPage() {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [status, setStatus] = useState("all");
+  const [billing, setBilling] = useState("billing_all");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<{
     users: UserRow[];
@@ -47,13 +62,14 @@ export default function AdminUsersPage() {
   // Reset to page 1 whenever the filters change.
   useEffect(() => {
     setPage(1);
-  }, [debounced, status]);
+  }, [debounced, status, billing]);
 
   const load = useCallback(async () => {
     setError(null);
     try {
       const params = new URLSearchParams({
         status,
+        billingStatus: billing,
         page: String(page),
       });
       if (debounced) params.set("search", debounced);
@@ -66,7 +82,7 @@ export default function AdminUsersPage() {
     } catch {
       setError("We couldn't load users. Please refresh.");
     }
-  }, [status, page, debounced]);
+  }, [status, billing, page, debounced]);
 
   useEffect(() => {
     void load();
@@ -100,6 +116,26 @@ export default function AdminUsersPage() {
         ))}
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium uppercase tracking-wide text-slate">
+          Billing
+        </span>
+        {BILLING_TABS.map((tab) => (
+          <button
+            key={tab.value}
+            type="button"
+            onClick={() => setBilling(tab.value)}
+            className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${
+              billing === tab.value
+                ? "bg-ink text-white"
+                : "bg-ink/5 text-slate hover:bg-ink/10"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
       {error ? <p className={errorClass}>{error}</p> : null}
 
       <div className="overflow-x-auto rounded-xl border border-ink/10 bg-white shadow-sm">
@@ -109,6 +145,7 @@ export default function AdminUsersPage() {
               <th className="px-4 py-3 font-medium">Name / Email</th>
               <th className="px-4 py-3 font-medium">Company</th>
               <th className="px-4 py-3 font-medium">Plan</th>
+              <th className="px-4 py-3 font-medium">Billing status</th>
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3 font-medium">Joined</th>
               <th className="px-4 py-3 font-medium">Actions</th>
@@ -117,7 +154,7 @@ export default function AdminUsersPage() {
           <tbody className="divide-y divide-ink/10">
             {data && data.users.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-slate">
+                <td colSpan={7} className="px-4 py-8 text-center text-slate">
                   No users match your filters.
                 </td>
               </tr>
@@ -131,6 +168,13 @@ export default function AdminUsersPage() {
                   <td className="px-4 py-3 text-ink">{u.companyName ?? "—"}</td>
                   <td className="px-4 py-3 text-ink">
                     {u.subscription ? u.subscription.planName : "No subscription"}
+                  </td>
+                  <td className="px-4 py-3">
+                    {u.subscription ? (
+                      <SubscriptionStatusBadge status={u.subscription.status} />
+                    ) : (
+                      <span className="text-xs text-slate">None</span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <UserStatusBadge
