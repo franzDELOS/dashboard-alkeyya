@@ -91,5 +91,129 @@ Add alongside Stripe vars:
 - `packages/db/prisma/schema.prisma` — additive columns + 2 new models.
 - `packages/db/prisma/migrations/*_add_polar_billing/` — **new** migration.
 - `packages/db/prisma/seed.ts` — corrected data + optional Polar/Stripe IDs.
+
+---
+
+## Phase 2 — wire Polar end-to-end ALONGSIDE Stripe (ADDITIVE ONLY)
+
+> Constraint check: the existing Stripe billing flow stays **byte-for-byte unchanged**
+> when `BILLING_PROVIDER` is `'stripe'` (the default). No Stripe route, handler, or UI
+> branch is deleted or rewritten — Polar is built next to it and selected by env. The
+> web app branches at runtime on `billingProvider` returned by `/billing/status`.
+
+### A. API — shared `GET /billing/status` (provider-agnostic)
+- Add `billingProvider: env.BILLING_PROVIDER` to the response. Existing
+  `isPilotApproved` + `subscription` fields and shape stay identical.
+- The subscription lookup is already by `userId` (one row per user), so it returns
+  whichever row exists (Stripe or Polar). No query change needed beyond returning the
+  provider flag.
+
+### B. API — new Polar customer routes (in `apps/api/src/routes/billing.ts`)
+Mirror the Stripe route guards exactly. Stripe routes are left untouched.
+- `POST /billing/polar/checkout-session` — `requireAuth`. Same pilot gate (403
+  `PILOT_NOT_APPROVED`) and same one-active-subscription rule (409 `ALREADY_SUBSCRIBED`
+  for `trialing|active|past_due`). Look up plan by `planId` (404 `PLAN_NOT_FOUND`; 422
+  `PLAN_NOT_POLAR_ENABLED` if no `polarProductId`). Lazily create-or-get a Polar
+  customer keyed by `externalId = user.id`, persist `user.polarCustomerId`. Create a
+  hosted checkout for `plan.polarProductId`. Return `{ url }`. No trial set here — it
+  comes from the Polar product config.
+- `POST /billing/polar/portal-session` — `requireAuth`. Require `user.polarCustomerId`
+  (404 `NO_BILLING_ACCOUNT`). Create a Polar customer session, return `{ url }`.
+
+### C. API — Polar webhook (`POST /billing/polar/webhook`)
+- Mounted with route-level `express.raw({ type: "application/json" })`, like Stripe's.
+- `app.ts`: add `/billing/polar/webhook` to **both** carve-outs (rate-limiter skip AND
+  JSON-parser skip) next to the existing `/billing/webhook` check.
+- Verify with `validateEvent(req.body, headers, env.POLAR_WEBHOOK_SECRET)`; on
+  `WebhookVerificationError` → 403. If `POLAR_WEBHOOK_SECRET` is unset → log + 503
+  (don't crash).
+- Idempotency: record the event id in `PolarWebhookEvent` BEFORE processing; if present,
+  ack 200 immediately. 2xx fast; log-and-continue on processing errors (Stripe pattern).
+- Handle: `subscription.created`, `subscription.updated`, `subscription.active`,
+  `subscription.canceled`, `subscription.uncanceled`, `subscription.past_due`,
+  `subscription.revoked`, `order.created`, `order.paid`. Unknown → log + ack.
+- Status map: `trialing→trialing`, `active→active`, `past_due→past_due`,
+  `canceled→canceled`, `unpaid|revoked→suspended`. past_due is **not** collapsed into
+  suspended (kept distinct).
+- Upsert `Subscription` by `userId` (resolve user via `data.metadata.userId` →
+  `customer.externalId` → `polarCustomerId`), set `provider="polar"`,
+  `polarSubscriptionId`, `planId` (product → `Plan.polarProductId`), `status`,
+  `currentPeriodEnd`, `trialEndsAt`, `cancelAtPeriodEnd`.
+- On `order.created`/`order.paid`, upsert `Invoice` by `polarOrderId`
+  (`amountDueCents`, `amountPaidCents`, `status`, `hostedInvoiceUrl` if present),
+  linked to the local Subscription.
+
+### D. Web — branch checkout + portal on provider (minimal diff)
+- `billing-client.tsx`: read `billingProvider` from `/api/billing/status`. In
+  `openPortal()`, call `/api/billing/polar/portal-session` when `'polar'`, else the
+  Stripe portal. Update the "hosted Stripe portal" comment.
+- `checkout/[planId]/`: thread the provider into `CheckoutClient` (fetch status in the
+  client). When `'polar'`, POST `/api/billing/polar/checkout-session` and
+  `window.location.href = url` (full redirect to Polar hosted checkout). When
+  `'stripe'`, keep the embedded flow exactly. Blocked/error states
+  (`PILOT_NOT_APPROVED`, `ALREADY_SUBSCRIBED`) keep working for both.
+- `return/`: source of truth is `GET /billing/status`. Handle whichever param is
+  present (`checkout_id` for Polar, `session_id` for Stripe). Keep Stripe's path.
+- No restyling; reuse `BillingShell`, `buttonClass`, existing components.
+
+### E. Env tightening (light)
+- Polar vars stay optional, but add a boot-time **warning** (not a crash) if
+  `BILLING_PROVIDER==='polar'` and any of `POLAR_ACCESS_TOKEN` /
+  `POLAR_WEBHOOK_SECRET` / the three product IDs are missing. Default
+  `BILLING_PROVIDER='stripe'`.
+
+### Schema gap found in Phase 1 (one additive migration needed)
+Phase 1 made `Plan.stripeProductId/stripePriceId` and `Invoice.stripeInvoiceId`
+optional, but **left `Subscription.stripeSubscriptionId` as required (`String @unique`)**.
+A Polar-only subscription row has no Stripe sub id, so Phase 2 must make
+`stripeSubscriptionId String?` (additive; `@unique` keeps allowing multiple NULLs).
+Migration name: `polar_subscription_optional`.
+
+### Polar SDK shapes — verified against installed `@polar-sh/sdk@0.48.1`
+Confirmed against `node_modules` types; differences from this phase's assumptions noted:
+- **Checkout create** — `polar.checkouts.create({ products: [productId], successUrl,
+  externalCustomerId, metadata })` → returns `{ id, url, clientSecret, customerId }`.
+  - ⚠️ Customer-linkage field is **`externalCustomerId`** (the prompt guessed
+    `customerExternalId`). Since checkout itself can create/link the customer by
+    external id, we still pre-create the customer to persist `polarCustomerId`.
+  - Success-URL token is **`checkout_id={CHECKOUT_ID}`** (matches assumption) →
+    `successUrl = ${APP_URL}/billing/return?checkout_id={CHECKOUT_ID}`.
+- **Customer create/lookup** — `polar.customers.getExternal({ externalId })` /
+  `polar.customers.create({ email, name?, externalId, metadata })` → `Customer { id }`.
+- **Customer session (portal)** — `polar.customerSessions.create({ customerId })` →
+  returns `{ token, customerPortalUrl }`.
+  - ⚠️ Portal URL field is **`customerPortalUrl`** (the prompt said `url`). We return
+    `{ url: session.customerPortalUrl }` to the browser.
+- **Subscription fetch** — `polar.subscriptions.get({ id })` exists, but the webhook
+  payload already embeds the full `Subscription`, so we usually don't need a refetch.
+- **Webhook verify** — `validateEvent(body: string|Buffer, headers: Record<string,
+  string>, secret)` from `@polar-sh/sdk/webhooks`; throws `WebhookVerificationError`.
+  - ⚠️ The verified payload is `{ type, timestamp, data }` with **no top-level event
+    id**. Polar uses Standard Webhooks, so the unique delivery id is the **`webhook-id`
+    header** — that's what we store in `PolarWebhookEvent.polarEventId` for idempotency.
+- **Status enum** — `incomplete | incomplete_expired | trialing | active | past_due |
+  canceled | unpaid`. Subscription carries `trialEnd`, `currentPeriodEnd`,
+  `cancelAtPeriodEnd`, `productId`, `customerId`, `customer.externalId`, `metadata`.
+- **Order** — carries `status` (`draft|pending|paid|refunded|partially_refunded|void`),
+  `paid`, `totalAmount`, `subscriptionId`, `productId`, `customerId`, `metadata`. It
+  has **no hosted invoice URL field** (only `invoiceNumber`/`isInvoiceGenerated`), so
+  `Invoice.hostedInvoiceUrl` stays null for Polar orders.
+
+### Files Phase 2 will touch
+- `apps/api/src/config/env.ts` — boot-time Polar-misconfig warning (E).
+- `apps/api/src/app.ts` — add `/billing/polar/webhook` to both carve-outs (C).
+- `apps/api/src/routes/billing.ts` — add status `billingProvider`, the 3 Polar routes,
+  webhook handler + Polar processEvent/upsert helpers (A,B,C).
+- `packages/db/prisma/schema.prisma` — `stripeSubscriptionId String?` (schema gap).
+- `packages/db/prisma/migrations/*_polar_subscription_optional/` — **new** migration.
+- `apps/web/.../billing/billing-client.tsx` — provider-aware `openPortal` (D).
+- `apps/web/.../billing/checkout/[planId]/checkout-client.tsx` + `page.tsx` —
+  provider-aware checkout (D).
+- `apps/web/.../billing/return/return-client.tsx` + `page.tsx` — handle `checkout_id`
+  and confirm via `/billing/status` (D).
+
+### Explicitly NOT in Phase 2
+- No Stripe removal; no usage/overage metering reporting yet; no admin UI for trialDays;
+  no plan upgrade/downgrade. Those are Phase 3+.
 </content>
 </invoke>

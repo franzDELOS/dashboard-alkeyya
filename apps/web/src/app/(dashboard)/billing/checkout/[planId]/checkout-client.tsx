@@ -31,8 +31,73 @@ export function CheckoutClient({ planId }: { planId: string }) {
     if (ran.current) return;
     ran.current = true;
 
+    // Both providers share the blocked-state handling (403 PILOT_NOT_APPROVED /
+    // 409 ALREADY_SUBSCRIBED); only the success path differs (Stripe embeds a
+    // client secret, Polar redirects to its hosted checkout).
+    const handleBlocked = async (res: Response): Promise<void> => {
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        message?: string;
+      };
+      const message =
+        data.message ??
+        (data.error === "ALREADY_SUBSCRIBED"
+          ? "You already have an active subscription."
+          : "You're not able to start a subscription yet.");
+      setState({ kind: "blocked", message });
+    };
+
+    const genericError = () =>
+      setState({
+        kind: "error",
+        message: "We couldn't start checkout. Please try again.",
+      });
+
     (async () => {
       try {
+        // Learn the active provider first so we hit the right checkout endpoint.
+        const statusRes = await authedFetch("/api/billing/status");
+        if (statusRes.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        if (!statusRes.ok) {
+          genericError();
+          return;
+        }
+        const { billingProvider } = (await statusRes.json()) as {
+          billingProvider: "stripe" | "polar";
+        };
+
+        if (billingProvider === "polar") {
+          const res = await authedFetch("/api/billing/polar/checkout-session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ planId }),
+          });
+          if (res.status === 401) {
+            router.replace("/login");
+            return;
+          }
+          if (res.status === 403 || res.status === 409 || res.status === 422) {
+            await handleBlocked(res);
+            return;
+          }
+          if (!res.ok) {
+            genericError();
+            return;
+          }
+          const { url } = (await res.json()) as { url: string | null };
+          if (!url) {
+            genericError();
+            return;
+          }
+          // Full-page redirect to Polar's hosted checkout (Polar is the MoR).
+          window.location.href = url;
+          return;
+        }
+
+        // --- Stripe: embedded Checkout on our domain (unchanged) -------------
         const res = await authedFetch("/api/billing/checkout-session", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -45,25 +110,12 @@ export function CheckoutClient({ planId }: { planId: string }) {
         }
 
         if (res.status === 403 || res.status === 409) {
-          const data = (await res.json().catch(() => ({}))) as {
-            error?: string;
-            message?: string;
-          };
-          // PILOT_NOT_APPROVED → not yet approved; ALREADY_SUBSCRIBED → has one.
-          const message =
-            data.message ??
-            (data.error === "ALREADY_SUBSCRIBED"
-              ? "You already have an active subscription."
-              : "You're not able to start a subscription yet.");
-          setState({ kind: "blocked", message });
+          await handleBlocked(res);
           return;
         }
 
         if (!res.ok) {
-          setState({
-            kind: "error",
-            message: "We couldn't start checkout. Please try again.",
-          });
+          genericError();
           return;
         }
 
@@ -71,18 +123,12 @@ export function CheckoutClient({ planId }: { planId: string }) {
           clientSecret: string | null;
         };
         if (!clientSecret) {
-          setState({
-            kind: "error",
-            message: "We couldn't start checkout. Please try again.",
-          });
+          genericError();
           return;
         }
         setState({ kind: "ready", clientSecret });
       } catch {
-        setState({
-          kind: "error",
-          message: "We couldn't start checkout. Please try again.",
-        });
+        genericError();
       }
     })();
   }, [planId, router]);

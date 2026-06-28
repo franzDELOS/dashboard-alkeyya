@@ -100,6 +100,32 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 
+// Polar vars stay OPTIONAL so the app boots pre-cutover, but a deploy that flips
+// BILLING_PROVIDER to 'polar' without the Polar credentials/products would fail
+// silently at request time. Warn loudly at boot instead (not a crash, so a
+// half-configured staging box still starts).
+if (env.BILLING_PROVIDER === "polar") {
+  const missing = (
+    [
+      ["POLAR_ACCESS_TOKEN", env.POLAR_ACCESS_TOKEN],
+      ["POLAR_WEBHOOK_SECRET", env.POLAR_WEBHOOK_SECRET],
+      ["POLAR_STARTER_PRODUCT_ID", env.POLAR_STARTER_PRODUCT_ID],
+      ["POLAR_GROWTH_PRODUCT_ID", env.POLAR_GROWTH_PRODUCT_ID],
+      ["POLAR_PREMIUM_PRODUCT_ID", env.POLAR_PREMIUM_PRODUCT_ID],
+    ] as const
+  )
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+
+  if (missing.length > 0) {
+    console.warn(
+      `[env] BILLING_PROVIDER=polar but these Polar vars are missing: ${missing.join(
+        ", "
+      )}. Polar billing will not work until they are set.`
+    );
+  }
+}
+
 export const corsOrigins = env.CORS_ORIGIN.split(",")
   .map((o) => o.trim())
   .filter(Boolean);
