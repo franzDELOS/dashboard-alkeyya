@@ -215,5 +215,115 @@ Confirmed against `node_modules` types; differences from this phase's assumption
 ### Explicitly NOT in Phase 2
 - No Stripe removal; no usage/overage metering reporting yet; no admin UI for trialDays;
   no plan upgrade/downgrade. Those are Phase 3+.
+
+---
+
+## Phase 3 — admin billing controls (ADDITIVE ONLY)
+
+> Constraint check: auth, the Stripe flow, and every existing admin route
+> (users/requests/audit, suspend/unsuspend, pilot approval) are untouched. New
+> billing-admin routes are added next to them; `logAudit()` is reused exactly as
+> today (fire-and-forget, never blocks the action). All money is integer cents.
+
+### A. Bug fix — Invoice list key on user detail
+- **`apps/api/src/routes/admin.ts`** — `GET /admin/users/:userId`: also `select`
+  `polarOrderId` in the invoices block (both ids returned; one is null per provider).
+- **`apps/web/.../admin/users/[userId]/page.tsx`** — `Invoice` type gains
+  `polarOrderId: string | null`; list `key` becomes
+  `inv.polarOrderId ?? inv.stripeInvoiceId ?? inv.createdAt`.
+
+### B. API — billing stats (`apps/api/src/routes/admin.ts`)
+- New `GET /admin/billing/stats`. Counts (all excluding `role: "admin"` users):
+  `active`, `trialing`, `past_due`, `canceled`, `suspended` Subscription rows;
+  `noSubscription` = Users with no subscription; `mrrCents` = Σ
+  `Plan.monthlyPriceUsd` over active subscriptions (rough estimate; ignores
+  grandfathered pricing).
+
+### C. API — plan price update (`apps/api/src/routes/admin.ts`)
+- New `PATCH /admin/plans/:planId/price`, body `{ monthlyPriceCents }` (Zod:
+  positive int). 404 if plan missing. If `polarProductId` is set, update the Polar
+  product price; on Polar failure → **502** (don't let the DB run ahead of Polar).
+  Update `Plan.monthlyPriceUsd`. `logAudit({ action: "plan_price_changed", ... })`.
+  Returns `{ plan: { id, name, monthlyPriceUsd } }`. Comment notes Polar
+  grandfathers existing subscribers; only new checkouts pay the new price.
+
+### D. API — trial controls (Polar subs only) (`apps/api/src/routes/admin.ts`)
+- `POST /admin/users/:userId/trial/grant`, body `{ days }` (Zod 1–90). Sub must
+  exist with `provider="polar"` + `polarSubscriptionId`, else **422**. Sets
+  `trialEnd = now + days`. Polar failure → 502. `logAudit("trial_granted")`.
+- `POST /admin/users/:userId/trial/end` (no body). Same provider guard. Ends the
+  trial immediately. Polar failure → 502. `logAudit("trial_ended")`.
+
+### E. API — orders + refund (Polar only) (`apps/api/src/routes/admin.ts`)
+- `GET /admin/users/:userId/orders` — `[]` if no `polarCustomerId`; else last 10
+  Polar orders as `[{ id, totalAmount, status, createdAt, productName }]`.
+- `POST /admin/users/:userId/refund`, body `{ orderId, amountCents?, reason? }`
+  (Zod: orderId required). Verify the order's `customerId` matches the user's
+  `polarCustomerId` → **403** otherwise. Refund via Polar; failure → 502.
+  `logAudit("refund_issued")`.
+
+### F. Web — admin overview stat cards (`apps/web/.../admin/page.tsx`)
+- Fetch `GET /api/admin/billing/stats` alongside the existing four fetches. Add two
+  cards after the existing four: **In trial** (`trialing`) and **Past due**
+  (`past_due`). The four existing cards (incl. "Active subscriptions" =
+  approved-users count) stay unchanged.
+
+### G. Web — new Plans admin page (`apps/web/.../admin/plans/page.tsx`, NEW)
+- Fetch `GET /api/billing/plans`. Card per plan (existing card style). Inline price
+  editor (dollars input → cents on submit) calling `PATCH
+  /api/admin/plans/:planId/price`; inline success/error. Subtle note: "Existing
+  subscribers keep their current price. Only new checkouts pay the updated amount."
+  No sidebar/nav wiring (done manually later).
+
+### H. Web — user detail billing additions (`apps/web/.../admin/users/[userId]/page.tsx`)
+- `UserDetail` type + `GET /admin/users/:userId` response gain
+  `subscription.provider` and top-level `polarCustomerId`.
+- Trial controls render only when `subscription.provider === "polar"`: "End trial
+  now" (confirm) when `status==="trialing"`, plus a "Grant trial" inline form
+  (1–90 days, default 14).
+- Orders & refund render only when `polarCustomerId` is set: fetch
+  `/api/admin/users/:userId/orders`, small table (Amount/Status/Date/Action) with a
+  per-paid-order "Refund" button opening an inline form (optional amount in dollars
+  = blank → full; optional reason) POSTing to `/refund`.
+
+### I. Admin-shared additions (`apps/web/.../admin-shared.tsx`)
+- `auditActionLabel`: `trial_granted`→"Trial granted", `trial_ended`→"Trial ended
+  early", `plan_price_changed`→"Plan price changed", `refund_issued`→"Refund issued".
+- New `SubscriptionStatusBadge`: active→signal, trialing→amber "Free trial",
+  past_due→amber/ink "Past due", suspended→ink "Suspended", canceled→paper "Canceled".
+
+### Polar SDK shapes — verified against `@polar-sh/sdk@0.48.1` (deviations noted)
+- **Plan price update is NOT a simple amount field.** `polar.products.update({ id,
+  productUpdate: { prices: [{ amountType: "fixed", priceAmount: cents }] } })`
+  — the `prices` array **replaces** the product's price list (Polar archives the old
+  price; existing subscribers are grandfathered). ⚠️ More involved than "update the
+  fixed price amount."
+- **Refund requires `amount` AND `reason`.** `polar.refunds.create({ orderId,
+  amount, reason, revokeBenefits: false })`. ⚠️ The prompt assumed both optional —
+  the SDK makes both required, so: full refund computes `amount = order.totalAmount
+  − order.refundedAmount`, and a missing reason defaults to `"customer_request"`
+  (enum: duplicate | fraudulent | customer_request | service_disruption |
+  satisfaction_guarantee | dispute_prevention | other).
+- **Trial update.** `polar.subscriptions.update({ id, subscriptionUpdate: {
+  trialEnd: Date } })`. ⚠️ The API doc mentions a literal `"now"` to end immediately,
+  but the SDK types `trialEnd` as `Date | null`, so end-trial passes `new Date()`.
+- **Orders list.** `polar.orders.list({ customerId, limit: 10 })`; the awaited
+  result is the page object → `res.result.items: Order[]`. Order carries
+  `totalAmount`, `refundedAmount`, `status`, `createdAt`, `customerId`,
+  `product.name`.
+
+### Files Phase 3 will touch
+- `apps/api/src/routes/admin.ts` — invoice select fix; new billing/plan/trial/order
+  /refund routes; provider + polarCustomerId in user detail. (+ imports: `z`, `polar`.)
+- `apps/web/src/app/(admin)/admin/page.tsx` — 2 new stat cards.
+- `apps/web/src/app/(admin)/admin/plans/page.tsx` — **new** plans page.
+- `apps/web/src/app/(admin)/admin/users/[userId]/page.tsx` — invoice key fix; trial
+  controls; orders & refund section; type additions.
+- `apps/web/src/app/(admin)/admin-shared.tsx` — audit labels + `SubscriptionStatusBadge`.
+- `POLAR_MIGRATION_PLAN.md` — this section.
+
+### Explicitly NOT in Phase 3
+- No schema/migration changes; no Stripe removal; no usage/overage metering; no admin
+  sidebar nav wiring; no Stripe-side equivalents of the trial/refund controls.
 </content>
 </invoke>

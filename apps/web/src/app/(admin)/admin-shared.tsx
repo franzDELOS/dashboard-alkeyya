@@ -12,6 +12,10 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   user_suspended: "Account suspended",
   user_unsuspended: "Account unsuspended",
   request_status_changed: "Request status changed",
+  trial_granted: "Trial granted",
+  trial_ended: "Trial ended early",
+  plan_price_changed: "Plan price changed",
+  refund_issued: "Refund issued",
 };
 
 export function auditActionLabel(action: string): string {
@@ -63,6 +67,26 @@ export function StatusBadge({ status }: { status: string }) {
       }`}
     >
       {statusLabel(status)}
+    </span>
+  );
+}
+
+/** Billing status chip for a subscription row (distinct from the request
+ *  StatusBadge above): active / free trial / past due / suspended / canceled. */
+export function SubscriptionStatusBadge({ status }: { status: string }) {
+  const map: Record<string, { cls: string; label: string }> = {
+    active: { cls: "bg-signal/10 text-signal", label: "Active" },
+    trialing: { cls: "bg-amber/10 text-amber", label: "Free trial" },
+    past_due: { cls: "bg-amber text-ink", label: "Past due" },
+    suspended: { cls: "bg-ink/10 text-ink", label: "Suspended" },
+    canceled: { cls: "bg-paper text-slate", label: "Canceled" },
+  };
+  const entry = map[status] ?? { cls: "bg-ink/10 text-ink", label: status };
+  return (
+    <span
+      className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${entry.cls}`}
+    >
+      {entry.label}
     </span>
   );
 }

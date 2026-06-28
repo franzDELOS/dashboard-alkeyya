@@ -28,6 +28,8 @@ export default function AdminOverviewPage() {
     pendingApproval: number;
     openRequests: number;
     activeSubscriptions: number;
+    trialing: number;
+    pastDue: number;
   } | null>(null);
   const [pending, setPending] = useState<UserRow[]>([]);
   const [openRequests, setOpenRequests] = useState<RequestRow[]>([]);
@@ -37,13 +39,21 @@ export default function AdminOverviewPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [allUsers, pendingRes, openRes, activeRes] = await Promise.all([
-        authedFetch("/api/admin/users?limit=1"),
-        authedFetch("/api/admin/users?status=pending_approval&limit=5"),
-        authedFetch("/api/admin/requests?status=open&limit=5"),
-        authedFetch("/api/admin/users?status=active&limit=1"),
-      ]);
-      if (!allUsers.ok || !pendingRes.ok || !openRes.ok || !activeRes.ok) {
+      const [allUsers, pendingRes, openRes, activeRes, billingRes] =
+        await Promise.all([
+          authedFetch("/api/admin/users?limit=1"),
+          authedFetch("/api/admin/users?status=pending_approval&limit=5"),
+          authedFetch("/api/admin/requests?status=open&limit=5"),
+          authedFetch("/api/admin/users?status=active&limit=1"),
+          authedFetch("/api/admin/billing/stats"),
+        ]);
+      if (
+        !allUsers.ok ||
+        !pendingRes.ok ||
+        !openRes.ok ||
+        !activeRes.ok ||
+        !billingRes.ok
+      ) {
         setError("We couldn't load the overview. Please refresh.");
         return;
       }
@@ -51,11 +61,14 @@ export default function AdminOverviewPage() {
       const pend = await pendingRes.json();
       const open = await openRes.json();
       const active = await activeRes.json();
+      const billing = await billingRes.json();
       setStats({
         totalUsers: all.total,
         pendingApproval: pend.total,
         openRequests: open.total,
         activeSubscriptions: active.total,
+        trialing: billing.trialing,
+        pastDue: billing.past_due,
       });
       setPending(pend.users as UserRow[]);
       setOpenRequests(open.requests as RequestRow[]);
@@ -93,6 +106,8 @@ export default function AdminOverviewPage() {
           label="Active subscriptions"
           value={stats?.activeSubscriptions}
         />
+        <StatCard label="In trial" value={stats?.trialing} />
+        <StatCard label="Past due" value={stats?.pastDue} />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
