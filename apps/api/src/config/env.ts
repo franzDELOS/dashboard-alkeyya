@@ -53,6 +53,25 @@ const EnvSchema = z
     STRIPE_GROWTH_PRODUCT_ID: z.string().min(1),
     STRIPE_GROWTH_PRICE_ID: z.string().min(1),
 
+    // ---- Polar billing (migration) -----------------------------------------
+    // Polar (Merchant of Record) is being introduced ALONGSIDE Stripe. These
+    // vars are OPTIONAL for now: the Polar client is constructed at boot but not
+    // exercised until Phase 2, so the app must boot whether or not the Polar
+    // products / tokens exist yet. Phase 2 will tighten the ones that become
+    // required (at minimum POLAR_ACCESS_TOKEN, POLAR_WEBHOOK_SECRET, and the
+    // three product IDs once BILLING_PROVIDER flips to 'polar').
+    //
+    // POLAR_SERVER selects Polar's environment; it maps to the SDK's ServerList.
+    POLAR_SERVER: z.enum(["sandbox", "production"]).default("sandbox"),
+    // Which provider the billing flow uses. Stays 'stripe' until Phase 2 cuts
+    // over; existing Stripe billing is unaffected while this is 'stripe'.
+    BILLING_PROVIDER: z.enum(["stripe", "polar"]).default("stripe"),
+    POLAR_ACCESS_TOKEN: z.string().min(1).optional(),
+    POLAR_WEBHOOK_SECRET: z.string().min(1).optional(),
+    POLAR_STARTER_PRODUCT_ID: z.string().min(1).optional(),
+    POLAR_GROWTH_PRODUCT_ID: z.string().min(1).optional(),
+    POLAR_PREMIUM_PRODUCT_ID: z.string().min(1).optional(),
+
     // ---- Phase 3: Request form → n8n ---------------------------------------
     // Where customer requests are forwarded for downstream automation. Required
     // (no default) so a misconfigured deploy fails fast at boot rather than

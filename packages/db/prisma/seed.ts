@@ -1,9 +1,15 @@
-// Seed the three fixed billing plans (Starter, Premium, Growth).
+// Seed the three fixed billing plans (Starter, Growth, Premium).
 //
-// Real Stripe Product/Price IDs are never hardcoded in source — they come from
-// environment variables so the same seed runs against test-mode and live-mode
-// Stripe accounts. Prices and feature lists ARE defined here (they're product
-// copy, not secrets) and upserted by plan name so re-running is idempotent.
+// Real Stripe/Polar Product/Price IDs are never hardcoded in source — they come
+// from environment variables so the same seed runs against test/sandbox and
+// live accounts. Prices, included-call allowances, overage pricing, and feature
+// lists ARE defined here (they're product copy/config, not secrets) and upserted
+// by plan name so re-running is idempotent.
+//
+// Migration note: billing is moving from Stripe to Polar (Merchant of Record).
+// During the migration this seed populates BOTH provider id sets, but neither is
+// required — a plan is seeded with whichever ids are present in the environment
+// (or none yet, before the Polar products exist). Phase 2 will tighten this.
 //
 // Env lives in the monorepo root .env (same file the API loads), so we load it
 // explicitly here rather than relying on Prisma's CWD-relative .env discovery.
@@ -21,90 +27,100 @@ import { prisma } from "../src/index.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
-/** Read a required env var or collect it into the missing list. */
-const missing: string[] = [];
-function required(name: string): string {
+/** Read an optional env var, returning undefined when unset/empty. Stripe and
+ *  Polar ids are all optional during the migration: a plan is seeded with
+ *  whichever ids exist in the environment. */
+function optional(name: string): string | undefined {
   const value = process.env[name];
-  if (!value) {
-    missing.push(name);
-    return "";
-  }
-  return value;
+  return value && value.length > 0 ? value : undefined;
 }
 
 type PlanSeed = {
   name: string;
-  stripeProductId: string;
-  stripePriceId: string;
   monthlyPriceUsd: number; // cents
+  includedCalls: number | null; // null = unlimited
+  overageUnitCents: number | null; // cents per overage call; null = no overage
   features: string[];
+  stripeProductId?: string;
+  stripePriceId?: string;
+  polarProductId?: string;
 };
 
+// Live pricing from alkeyya.com/pricing (cents). Call-count feature bullets are
+// intentionally omitted here — the allowance lives in includedCalls/overage.
 const plans: PlanSeed[] = [
   {
     name: "Starter",
-    stripeProductId: required("STRIPE_STARTER_PRODUCT_ID"),
-    stripePriceId: required("STRIPE_STARTER_PRICE_ID"),
-    monthlyPriceUsd: 9900,
+    monthlyPriceUsd: 3900,
+    includedCalls: 35,
+    overageUnitCents: 49,
     features: [
       "1 phone number",
       "Business hours call handling",
       "Email notifications",
-      "Up to 100 calls/month",
     ],
-  },
-  {
-    name: "Premium",
-    stripeProductId: required("STRIPE_PREMIUM_PRODUCT_ID"),
-    stripePriceId: required("STRIPE_PREMIUM_PRICE_ID"),
-    monthlyPriceUsd: 19900,
-    features: [
-      "1 phone number",
-      "24/7 call handling",
-      "SMS + email notifications",
-      "Up to 500 calls/month",
-      "Appointment booking integration",
-    ],
+    stripeProductId: optional("STRIPE_STARTER_PRODUCT_ID"),
+    stripePriceId: optional("STRIPE_STARTER_PRICE_ID"),
+    polarProductId: optional("POLAR_STARTER_PRODUCT_ID"),
   },
   {
     name: "Growth",
-    stripeProductId: required("STRIPE_GROWTH_PRODUCT_ID"),
-    stripePriceId: required("STRIPE_GROWTH_PRICE_ID"),
-    monthlyPriceUsd: 39900,
+    monthlyPriceUsd: 6900,
+    includedCalls: 100,
+    overageUnitCents: 49,
     features: [
       "Up to 3 phone numbers",
       "24/7 call handling",
       "SMS + email notifications",
-      "Unlimited calls",
       "Appointment booking integration",
       "Priority support",
     ],
+    stripeProductId: optional("STRIPE_GROWTH_PRODUCT_ID"),
+    stripePriceId: optional("STRIPE_GROWTH_PRICE_ID"),
+    polarProductId: optional("POLAR_GROWTH_PRODUCT_ID"),
+  },
+  {
+    name: "Premium",
+    monthlyPriceUsd: 9900,
+    includedCalls: null, // unlimited
+    overageUnitCents: null, // no overage
+    features: [
+      "1 phone number",
+      "24/7 call handling",
+      "SMS + email notifications",
+      "Appointment booking integration",
+    ],
+    stripeProductId: optional("STRIPE_PREMIUM_PRODUCT_ID"),
+    stripePriceId: optional("STRIPE_PREMIUM_PRICE_ID"),
+    polarProductId: optional("POLAR_PREMIUM_PRODUCT_ID"),
   },
 ];
 
-if (missing.length > 0) {
-  console.error(
-    "Cannot seed plans — missing required Stripe env vars:\n  " +
-      missing.join("\n  ") +
-      "\nSet these in the root .env (see .env.example) and re-run."
-  );
-  process.exit(1);
-}
-
 async function main() {
   for (const plan of plans) {
+    // Only write provider ids that are actually present, so re-running before
+    // Polar products (or Stripe products) exist doesn't blank out a set id.
+    const data = {
+      monthlyPriceUsd: plan.monthlyPriceUsd,
+      includedCalls: plan.includedCalls,
+      overageUnitCents: plan.overageUnitCents,
+      features: plan.features,
+      isActive: true,
+      ...(plan.stripeProductId ? { stripeProductId: plan.stripeProductId } : {}),
+      ...(plan.stripePriceId ? { stripePriceId: plan.stripePriceId } : {}),
+      ...(plan.polarProductId ? { polarProductId: plan.polarProductId } : {}),
+    };
+
     const row = await prisma.plan.upsert({
       where: { name: plan.name },
-      update: {
-        stripeProductId: plan.stripeProductId,
-        stripePriceId: plan.stripePriceId,
-        monthlyPriceUsd: plan.monthlyPriceUsd,
-        features: plan.features,
-        isActive: true,
-      },
-      create: plan,
+      update: data,
+      create: { name: plan.name, ...data },
     });
-    console.log(`Seeded plan: ${row.name} ($${row.monthlyPriceUsd / 100}/mo)`);
+    const allowance =
+      row.includedCalls === null ? "unlimited" : `${row.includedCalls} calls`;
+    console.log(
+      `Seeded plan: ${row.name} ($${row.monthlyPriceUsd / 100}/mo, ${allowance})`
+    );
   }
 }
 

@@ -115,6 +115,14 @@ billingRouter.post(
     });
     if (!plan) return res.status(404).json({ error: "PLAN_NOT_FOUND" });
 
+    // stripePriceId became optional with the Polar migration (a Polar-only plan
+    // has no Stripe price). This Stripe checkout path requires it; every current
+    // plan still has one, so this guard never trips today — it just keeps the
+    // Stripe flow type-safe and fails cleanly if a non-Stripe plan reaches here.
+    if (!plan.stripePriceId) {
+      return res.status(400).json({ error: "PLAN_NOT_STRIPE_ENABLED" });
+    }
+
     // Lazily create the Stripe Customer the first time the user checks out.
     let customerId = user.stripeCustomerId;
     if (!customerId) {

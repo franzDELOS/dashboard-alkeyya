@@ -39,6 +39,9 @@ model User {
   // pilot outside this dashboard first). role distinguishes the founder/admin
   // (who can approve pilots) from customers.
   stripeCustomerId String? @unique
+  // Polar (migration): the customer's id in Polar, created lazily at first
+  // checkout in Phase 2. Mirrors stripeCustomerId.
+  polarCustomerId  String? @unique
   isPilotApproved  Boolean @default(false)
   role             String  @default("customer") // "customer" | "admin"
 
@@ -109,10 +112,25 @@ model PasswordReset {
 // request. Stripe remains the source of truth; webhooks keep these rows in sync.
 
 model Plan {
-  id              String   @id @default(cuid())
-  name            String   @unique // "Starter" | "Premium" | "Growth"
-  stripeProductId String   @unique
-  stripePriceId   String   @unique
+  id   String @id @default(cuid())
+  name String @unique // "Starter" | "Growth" | "Premium"
+
+  // Stripe IDs are now OPTIONAL so a Polar-only plan doesn't require them. The
+  // @unique constraints remain (Postgres permits multiple NULLs under a unique
+  // index, so unset Polar/Stripe plans don't collide).
+  stripeProductId String? @unique
+  stripePriceId   String? @unique
+
+  // ---- Polar (migration) ---------------------------------------------------
+  // The Polar product backing this plan, plus the metering config for usage
+  // billing. includedCalls = the monthly call allowance (null = unlimited);
+  // overageUnitCents = per-call price beyond the allowance in cents (null =
+  // no overage). polarMeterId links to the Polar meter for usage reporting.
+  polarProductId   String? @unique
+  includedCalls    Int? // null = unlimited
+  overageUnitCents Int? // cents per overage call; null = no overage
+  polarMeterId     String?
+
   monthlyPriceUsd Int // stored in cents to avoid float issues
   features        String[]
   isActive        Boolean  @default(true)
@@ -128,7 +146,12 @@ model Subscription {
   planId               String
   plan                 Plan      @relation(fields: [planId], references: [id])
   stripeSubscriptionId String    @unique
-  status               String // mirrors Stripe: "trialing" | "active" | "past_due" | "suspended" | "canceled"
+  // Polar (migration): the subscription id in Polar. provider records which
+  // billing system owns this row so the app can route correctly during and
+  // after the cutover. Defaults to "stripe" for all existing rows.
+  polarSubscriptionId  String?   @unique
+  provider             String    @default("stripe") // "stripe" | "polar"
+  status               String // mirrors provider: "trialing" | "active" | "past_due" | "suspended" | "canceled"
   currentPeriodEnd     DateTime?
   trialEndsAt          DateTime?
   cancelAtPeriodEnd    Boolean   @default(false)
@@ -142,7 +165,10 @@ model Invoice {
   id               String       @id @default(cuid())
   subscriptionId   String
   subscription     Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-  stripeInvoiceId  String       @unique
+  stripeInvoiceId  String?      @unique
+  // Polar (migration): Polar issues Orders rather than Stripe invoices. Mirrors
+  // stripeInvoiceId; one of the two identifies a row depending on provider.
+  polarOrderId     String?      @unique
   amountDueCents   Int
   amountPaidCents  Int
   status           String // mirrors Stripe: "paid" | "open" | "uncollectible" | "void"
@@ -159,6 +185,25 @@ model StripeWebhookEvent {
   stripeEventId String   @unique
   type          String
   processedAt   DateTime @default(now())
+}
+
+// Polar (migration): the same idempotency ledger as StripeWebhookEvent, for
+// Polar webhook deliveries. Every Polar event id is recorded before processing
+// so a redelivery is skipped. Used from Phase 2 onward.
+model PolarWebhookEvent {
+  id           String   @id @default(cuid())
+  polarEventId String   @unique
+  type         String
+  processedAt  DateTime @default(now())
+}
+
+// Single typed settings row for billing-wide config (admin-editable later).
+// Phase 1 introduces only trialDays (the Checkout trial length, currently a
+// hardcoded 14 in the Stripe flow). One row is expected; seeded/upserted later.
+model BillingConfig {
+  id        String   @id @default(cuid())
+  trialDays Int      @default(14)
+  updatedAt DateTime @updatedAt
 }
 
 // ---- Phase 3: Support requests ----------------------------------------------
