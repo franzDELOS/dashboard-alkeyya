@@ -4,11 +4,10 @@ The customer-facing account, billing, and request portal for Alkeyya AI.
 Served at **app.alkeyya.com**, alongside (but isolated from) your website,
 Twenty CRM, and n8n.
 
-> **Status — Phases 0–5 complete.** Authentication (registration, email
-> verification, login, refresh-token rotation, password reset), Stripe billing
-> with embedded Checkout, account settings, the support-request → n8n flow, the
-> internal `/admin` panel, and Phase 5 security hardening (rate limiting,
-> CSP/HSTS, Nginx TLS hardening, nightly database backups) are all in place.
+> **Status — Phases 0–5 complete.** Authentication, Polar billing (Merchant of
+> Record) with hosted Checkout and customer portal, account settings, the
+> support-request → n8n flow, the internal `/admin` panel, rate limiting,
+> CSP/HSTS, Nginx TLS hardening, and nightly database backups are all in place.
 > Jump to **[Production deployment](#production-deployment)** for a fresh VPS.
 
 ## Stack
@@ -43,7 +42,7 @@ CORS in the browser path.
 ## Local development
 
 ```bash
-cp .env.example .env          # then edit POSTGRES_PASSWORD etc.
+cp .env.example .env          # then edit POSTGRES_PASSWORD, Polar vars, etc.
 
 corepack enable               # makes pnpm available (bundled with Node 22)
 pnpm setup                    # install + prisma generate + build db package
@@ -52,7 +51,7 @@ pnpm setup                    # install + prisma generate + build db package
 docker compose up -d dashboard-postgres
 
 pnpm db:migrate               # apply migrations to the local DB
-pnpm db:seed                  # seed the three billing plans (needs STRIPE_* in .env)
+pnpm db:seed                  # seed the three billing plans (needs POLAR_*_PRODUCT_ID in .env)
 
 # Run API + web in watch mode:
 pnpm dev
@@ -109,9 +108,9 @@ Edit `.env` and set **every** value. Critical ones for production:
   ≥32 chars. Generate with `openssl rand -hex 32` (run it twice). The API
   refuses to boot if they are missing or equal.
 - `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME` — transactional email.
-- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and the six
-  `STRIPE_*_PRODUCT_ID` / `STRIPE_*_PRICE_ID` values (create the products/prices
-  in Stripe first), plus `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`.
+- `BILLING_PROVIDER=polar`, `POLAR_SERVER=production`, `POLAR_ACCESS_TOKEN`,
+  `POLAR_WEBHOOK_SECRET`, `POLAR_STARTER_PRODUCT_ID`, `POLAR_GROWTH_PRODUCT_ID`,
+  `POLAR_PREMIUM_PRODUCT_ID` — see **[Billing provider](#billing-provider)** below.
 - `N8N_WEBHOOK_URL`, `N8N_WEBHOOK_SECRET`.
 
 ### 5. Install deps + generate the Prisma client (host)
@@ -135,7 +134,7 @@ pnpm db:deploy        # prisma migrate deploy — applies committed migrations, 
 
 ### 8. Seed the billing plans
 ```bash
-pnpm db:seed          # upserts Starter/Premium/Growth from the STRIPE_* env values; idempotent
+pnpm db:seed          # upserts Starter/Premium/Growth with polarProductId from env; idempotent
 ```
 
 ### 9. Build and start the API + web
@@ -206,8 +205,34 @@ Backblaze) — a single VPS with no offsite copy is a business risk, not just a
 technical one. Restore with `scripts/restore-db.sh /path/to/backup.sql.gz`.
 
 ### 16. Smoke-test the full flow
-Register → verify email → login → billing → embedded Checkout (Stripe **test**
-mode) → admin panel → approve a pilot.
+Register → verify email → login → billing → choose a plan → complete Polar
+hosted Checkout (sandbox) → confirm subscription row created with
+`provider=polar, status=trialing` → open billing portal → confirm Polar
+customer portal loads → admin panel → approve a pilot.
+
+## Billing provider
+
+**Polar** is the Merchant of Record. To activate:
+
+1. In the Polar dashboard (sandbox for dev, production for live): create the
+   three products (Starter $39, Growth $69, Premium $99) with 14-day trials.
+   For Starter and Growth, add a metered price for overage calls.
+2. Register the webhook endpoint:
+   `https://app.alkeyya.com/api/billing/polar/webhook`
+   Format: **Raw (Standard Webhooks)**. Subscribe to these nine events:
+   `subscription.created`, `subscription.updated`, `subscription.active`,
+   `subscription.canceled`, `subscription.uncanceled`, `subscription.past_due`,
+   `subscription.revoked`, `order.created`, `order.paid`.
+   Copy the signing secret → `POLAR_WEBHOOK_SECRET`.
+3. Create a Polar Org Access Token → `POLAR_ACCESS_TOKEN`.
+4. Set in `.env`: `BILLING_PROVIDER=polar`, `POLAR_SERVER=production`, and the
+   five vars above plus the three `POLAR_*_PRODUCT_ID` values.
+5. Run `pnpm db:seed` to write the product IDs into the Plan rows.
+6. Restart the API container; tail logs to confirm clean boot.
+
+**Stripe is retired.** The `STRIPE_*` env vars are optional; the app boots
+and serves all billing flows without them. Historical Stripe data is preserved
+in the database schema.
 
 ## Future Phases
 

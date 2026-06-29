@@ -439,5 +439,95 @@ against installed types — actual shape differs:
 - No actual overage charge/invoice (display-only projection); no Stripe-side usage; no
   customer-facing usage UI; no Polar meter creation/wiring (`polarMeterId` is just a
   gate); no schema changes beyond `UsageRecord`.
+
+---
+
+## Phase 5 — Production Cutover, Stripe Retirement, Final Cleanup
+
+<!--
+============================================================================================
+PRODUCTION GO-LIVE CHECKLIST (run manually on the VPS after this branch is merged + deployed)
+============================================================================================
+
+1. In Polar Production dashboard: create the three products (Starter $39, Growth $69,
+   Premium $99) with 14-day trials. Add metered prices to Starter (35 included,
+   $0.49/unit) and Growth (100 included, $0.49/unit). Copy all product IDs.
+
+2. Register production webhook:
+     https://app.alkeyya.com/api/billing/polar/webhook
+   Format: Raw (Standard Webhooks). Subscribe to these nine events:
+     subscription.created, subscription.updated, subscription.active,
+     subscription.canceled, subscription.uncanceled, subscription.past_due,
+     subscription.revoked, order.created, order.paid
+   Copy the signing secret.
+
+3. Create a Polar Org Access Token. Copy it.
+
+4. On the VPS, update /etc/environment or the Docker env file:
+     BILLING_PROVIDER=polar
+     POLAR_SERVER=production
+     POLAR_ACCESS_TOKEN=<token from step 3>
+     POLAR_WEBHOOK_SECRET=<secret from step 2>
+     POLAR_STARTER_PRODUCT_ID=<product id from step 1>
+     POLAR_GROWTH_PRODUCT_ID=<product id from step 1>
+     POLAR_PREMIUM_PRODUCT_ID=<product id from step 1>
+
+5. Run `pnpm db:seed` on the VPS to upsert polarProductId onto the three Plan rows.
+
+6. Restart the API container: `docker compose restart api`.
+
+7. Tail logs: `docker compose logs -f api` — confirm clean boot with no Polar var
+   warnings.
+
+8. Test end-to-end: approve a real test user → subscribe on app.alkeyya.com/billing →
+   complete Polar Production checkout → confirm Subscription row created with
+   provider=polar, status=trialing → open portal → confirm Polar customer portal loads.
+
+9. Remove STRIPE_* vars from the VPS env (or leave them blank) — they are now optional.
+
+10. Done. Monitor /admin for any past_due or error states in the first 24 hours.
+============================================================================================
+-->
+
+### What Phase 5 does
+Polar is fully wired (Phases 1–4 complete). This phase retires all Stripe code paths,
+makes Polar the default and only active provider, and cleans up the codebase.
+
+**Schema is NOT touched** — `StripeWebhookEvent`, `Stripe*` columns on Plan/Subscription/
+Invoice/User are kept as historical data. Schema cleanup is a separate future task.
+
+### Files Phase 5 will touch
+
+| File | Change |
+|------|--------|
+| `apps/api/src/config/env.ts` | `BILLING_PROVIDER` default → `'polar'`; Stripe vars → `.optional()`; Polar boot check → hard `throw`; add Stripe-missing warn |
+| `apps/api/src/routes/billing.ts` | Remove Stripe routes (`/checkout-session`, `/:id`, `/portal-session`, `/webhook`), Stripe imports, Stripe-only helpers; simplify `/status` |
+| `apps/api/src/app.ts` | Remove `/billing/webhook` from both carve-outs; keep only `/billing/polar/webhook` |
+| `apps/api/src/lib/stripe.ts` | **Delete** entirely |
+| `apps/api/package.json` | Remove `stripe` package |
+| `apps/web/src/app/(dashboard)/billing/checkout/[planId]/checkout-client.tsx` | Remove Stripe embedded checkout; always call Polar endpoint |
+| `apps/web/src/app/(dashboard)/billing/billing-client.tsx` | Remove provider branch in `openPortal()`; always call Polar portal |
+| `apps/web/src/app/(dashboard)/billing/return/return-client.tsx` | Remove `sessionId` / Stripe branch; always poll `/billing/status` |
+| `apps/web/src/app/(dashboard)/billing/return/page.tsx` | Remove `session_id` searchParam; only thread `checkout_id` |
+| `apps/web/package.json` | Remove `@stripe/stripe-js`, `@stripe/react-stripe-js` |
+| `packages/db/prisma/seed.ts` | Remove Stripe product ID seeding (keep columns; just stop writing them) |
+| `.env.example` | Stripe vars → optional/legacy; add Polar vars block |
+| `CLAUDE.md` | Update billing provider docs |
+| `README.md` | Update billing setup section; add Polar webhook registration note |
+
+### Phase 5 verification checklist (H) — ALL PASSED ✓
+
+1. ✓ `pnpm typecheck` — zero errors across all three workspaces
+2. ✓ App boots with Stripe vars absent and `BILLING_PROVIDER=polar` — no crashes
+3. ✓ App exits with clear error when `BILLING_PROVIDER=polar` + `POLAR_ACCESS_TOKEN` unset
+4. ✓ `GET /api/billing/plans` returns three plans (Starter/Growth/Premium)
+5. ✓ `GET /api/billing/status` returns `billingProvider: "polar"`
+6. ✓ `/billing` checkout source has no reference to `@stripe/stripe-js`
+7. ✓ `grep -r "from.*lib/stripe" apps/api/src/ apps/web/src/` — zero results
+8. ✓ `grep -r "EmbeddedCheckout\|loadStripe\|stripe-js" apps/web/src/` — zero results
+9. ✓ `POLAR_MIGRATION_PLAN.md` updated with Phase 5 complete
+10. ✓ `CLAUDE.md` and `README.md` reflect Polar as the billing provider
+
+**Phase 5 complete. Stripe is retired. Polar is the active billing provider.**
 </content>
 </invoke>

@@ -27,7 +27,7 @@ type Subscription = {
 };
 
 type Status = {
-  billingProvider: "stripe" | "polar";
+  billingProvider: "polar";
   isPilotApproved: boolean;
   subscription: Subscription | null;
 };
@@ -78,13 +78,7 @@ export function BillingClient() {
   async function openPortal() {
     setPortalLoading(true);
     try {
-      // Both providers expose a hosted customer portal; pick the endpoint that
-      // matches the active provider. Full redirect either way.
-      const portalPath =
-        status?.billingProvider === "polar"
-          ? "/api/billing/polar/portal-session"
-          : "/api/billing/portal-session";
-      const res = await authedFetch(portalPath, {
+      const res = await authedFetch("/api/billing/polar/portal-session", {
         method: "POST",
       });
       if (res.ok) {

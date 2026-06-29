@@ -56,24 +56,23 @@ export function createApp(): Application {
   );
 
   // Global rate limit: 60 req/min/IP across every route, as a baseline DoS
-  // guard on top of the tighter per-endpoint auth limiters. The billing webhooks
-  // are exempt — Stripe/Polar retry from unpredictable IP ranges and must never
-  // be throttled (same carve-out as the JSON parser below).
+  // guard on top of the tighter per-endpoint auth limiters. The Polar webhook is
+  // exempt — Polar retries from unpredictable IP ranges and must never be
+  // throttled (same carve-out as the JSON parser below).
   app.use((req: Request, res: Response, next: express.NextFunction) => {
-    if (req.path === "/billing/webhook" || req.path === "/billing/polar/webhook") {
+    if (req.path === "/billing/polar/webhook") {
       return next();
     }
     return apiLimiter(req, res, next);
   });
 
-  // Parse JSON for every route EXCEPT the billing webhooks. Stripe and Polar
-  // signature verification both need the exact raw request bytes, so these paths
-  // must never be JSON-parsed here — each uses its own express.raw() in
-  // billing.ts. (Express 5's req.path is the full path at app level; both
-  // providers POST to these exact paths with no query string.)
+  // Parse JSON for every route EXCEPT the Polar billing webhook. Polar's
+  // Standard Webhooks signature verification needs the exact raw request bytes,
+  // so this path must never be JSON-parsed here — it uses its own express.raw()
+  // in billing.ts. (Express 5's req.path is the full path at app level.)
   const jsonParser = express.json({ limit: "1mb" });
   app.use((req: Request, res: Response, next: express.NextFunction) => {
-    if (req.path === "/billing/webhook" || req.path === "/billing/polar/webhook") {
+    if (req.path === "/billing/polar/webhook") {
       return next();
     }
     return jsonParser(req, res, next);

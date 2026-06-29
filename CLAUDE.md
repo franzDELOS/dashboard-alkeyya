@@ -156,10 +156,21 @@ sudo nginx -t && sudo systemctl reload nginx
 - Server closes, allowing in-flight requests to finish.
 - 10-second force-exit timeout to avoid hanging.
 
+## Billing Provider
+
+**Polar** is the active Merchant of Record as of Phase 5. Stripe is retired.
+
+- **Webhook endpoint**: `POST /billing/polar/webhook` (carved out of both the global rate limiter and JSON parser in `app.ts`; uses `express.raw()` in `billing.ts` for signature verification).
+- **Polar env vars** (all required when `BILLING_PROVIDER=polar`, the default):
+  `POLAR_ACCESS_TOKEN`, `POLAR_WEBHOOK_SECRET`, `POLAR_STARTER_PRODUCT_ID`, `POLAR_GROWTH_PRODUCT_ID`, `POLAR_PREMIUM_PRODUCT_ID`. The API hard-exits at boot if any are missing.
+- **Stripe env vars** are optional/legacy. The app boots and serves all billing flows without them. The DB schema still stores historical Stripe columns (`stripeCustomerId`, `stripeSubscriptionId`, etc.) — those columns are kept as data; schema cleanup is a separate future task.
+- **Seeding**: `pnpm db:seed` upserts the three Plan rows and writes `polarProductId` from env. Run after setting `POLAR_*_PRODUCT_ID`.
+- **Subscribe to these nine Polar webhook events**: `subscription.created`, `subscription.updated`, `subscription.active`, `subscription.canceled`, `subscription.uncanceled`, `subscription.past_due`, `subscription.revoked`, `order.created`, `order.paid`.
+
 ## Roadmap (Phase 1+)
 
 - **Phase 1**: Auth (registration, email verification via Brevo, login, refresh-token rotation, password reset, sessions), first Prisma migration with User/Account models, branded authenticated layout.
-- **Phase 5**: Backups (nightly pg_dump to offsite object storage).
+- **Phase 5 (complete)**: Stripe retired; Polar is the active billing provider; DB schema cleanup (dropping Stripe columns) deferred to a future task.
 
 ## Notable Constraints & Decisions
 

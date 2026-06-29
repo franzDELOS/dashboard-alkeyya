@@ -33,39 +33,30 @@ const EnvSchema = z
     // Public web origin, used to build verification/reset links in emails.
     APP_URL: z.string().url().default("http://localhost:3001"),
 
-    // ---- Phase 2: Stripe billing -------------------------------------------
-    // No defaults: billing must never silently misconfigure. The secret/webhook
-    // keys carry their well-known Stripe prefixes so a swapped key fails fast.
+    // ---- Stripe billing (retired — optional / legacy) -----------------------
+    // Stripe is no longer the active provider. These vars are kept optional so
+    // the app boots without them; Stripe columns in the DB are preserved as
+    // historical data. Set these only if rolling back to Stripe.
     STRIPE_SECRET_KEY: z
       .string()
-      .startsWith("sk_", "STRIPE_SECRET_KEY must start with 'sk_'"),
+      .startsWith("sk_", "STRIPE_SECRET_KEY must start with 'sk_'")
+      .optional(),
     STRIPE_WEBHOOK_SECRET: z
       .string()
-      .startsWith("whsec_", "STRIPE_WEBHOOK_SECRET must start with 'whsec_'"),
+      .startsWith("whsec_", "STRIPE_WEBHOOK_SECRET must start with 'whsec_'")
+      .optional(),
+    STRIPE_STARTER_PRODUCT_ID: z.string().min(1).optional(),
+    STRIPE_STARTER_PRICE_ID: z.string().min(1).optional(),
+    STRIPE_PREMIUM_PRODUCT_ID: z.string().min(1).optional(),
+    STRIPE_PREMIUM_PRICE_ID: z.string().min(1).optional(),
+    STRIPE_GROWTH_PRODUCT_ID: z.string().min(1).optional(),
+    STRIPE_GROWTH_PRICE_ID: z.string().min(1).optional(),
 
-    // Product/Price IDs for the three fixed plans. Seeded into Plan rows; the
-    // API itself reads them only via the database, but they're validated here
-    // so a missing one is caught at boot rather than at seed time.
-    STRIPE_STARTER_PRODUCT_ID: z.string().min(1),
-    STRIPE_STARTER_PRICE_ID: z.string().min(1),
-    STRIPE_PREMIUM_PRODUCT_ID: z.string().min(1),
-    STRIPE_PREMIUM_PRICE_ID: z.string().min(1),
-    STRIPE_GROWTH_PRODUCT_ID: z.string().min(1),
-    STRIPE_GROWTH_PRICE_ID: z.string().min(1),
-
-    // ---- Polar billing (migration) -----------------------------------------
-    // Polar (Merchant of Record) is being introduced ALONGSIDE Stripe. These
-    // vars are OPTIONAL for now: the Polar client is constructed at boot but not
-    // exercised until Phase 2, so the app must boot whether or not the Polar
-    // products / tokens exist yet. Phase 2 will tighten the ones that become
-    // required (at minimum POLAR_ACCESS_TOKEN, POLAR_WEBHOOK_SECRET, and the
-    // three product IDs once BILLING_PROVIDER flips to 'polar').
-    //
-    // POLAR_SERVER selects Polar's environment; it maps to the SDK's ServerList.
+    // ---- Polar billing (active provider) ------------------------------------
+    // POLAR_SERVER selects Polar's environment (maps to the SDK's ServerList).
     POLAR_SERVER: z.enum(["sandbox", "production"]).default("sandbox"),
-    // Which provider the billing flow uses. Stays 'stripe' until Phase 2 cuts
-    // over; existing Stripe billing is unaffected while this is 'stripe'.
-    BILLING_PROVIDER: z.enum(["stripe", "polar"]).default("stripe"),
+    // Polar is now the default and only active billing provider.
+    BILLING_PROVIDER: z.enum(["stripe", "polar"]).default("polar"),
     POLAR_ACCESS_TOKEN: z.string().min(1).optional(),
     POLAR_WEBHOOK_SECRET: z.string().min(1).optional(),
     POLAR_STARTER_PRODUCT_ID: z.string().min(1).optional(),
@@ -100,10 +91,8 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 
-// Polar vars stay OPTIONAL so the app boots pre-cutover, but a deploy that flips
-// BILLING_PROVIDER to 'polar' without the Polar credentials/products would fail
-// silently at request time. Warn loudly at boot instead (not a crash, so a
-// half-configured staging box still starts).
+// Polar is the active provider — hard fail if any required var is missing.
+// This mirrors the fail-fast pattern used for DATABASE_URL / JWT secrets above.
 if (env.BILLING_PROVIDER === "polar") {
   const missing = (
     [
@@ -118,10 +107,27 @@ if (env.BILLING_PROVIDER === "polar") {
     .map(([name]) => name);
 
   if (missing.length > 0) {
+    console.error(
+      `Invalid environment configuration: BILLING_PROVIDER=polar but these required Polar vars are missing: ${missing.join(", ")}`
+    );
+    process.exit(1);
+  }
+}
+
+// Warn loudly if someone attempts a Stripe rollback without the Stripe vars.
+if (env.BILLING_PROVIDER === "stripe") {
+  const missingStripe = (
+    [
+      ["STRIPE_SECRET_KEY", env.STRIPE_SECRET_KEY],
+      ["STRIPE_WEBHOOK_SECRET", env.STRIPE_WEBHOOK_SECRET],
+    ] as const
+  )
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+
+  if (missingStripe.length > 0) {
     console.warn(
-      `[env] BILLING_PROVIDER=polar but these Polar vars are missing: ${missing.join(
-        ", "
-      )}. Polar billing will not work until they are set.`
+      `[env] BILLING_PROVIDER=stripe but these Stripe vars are missing: ${missingStripe.join(", ")}. Stripe billing will not work until they are set.`
     );
   }
 }

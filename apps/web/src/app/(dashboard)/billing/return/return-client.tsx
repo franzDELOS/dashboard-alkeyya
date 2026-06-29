@@ -15,13 +15,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // A fresh checkout lands here as "trialing" (trial) or "active" (no trial).
 const SUBSCRIBED_STATUSES = new Set(["trialing", "active"]);
 
-export function ReturnClient({
-  sessionId,
-  checkoutId,
-}: {
-  sessionId: string | null;
-  checkoutId: string | null;
-}) {
+export function ReturnClient({ checkoutId }: { checkoutId: string | null }) {
   const router = useRouter();
   const ran = useRef(false);
   const [state, setState] = useState<State>({ kind: "loading" });
@@ -32,35 +26,9 @@ export function ReturnClient({
 
     (async () => {
       try {
-        // --- Stripe: confirm the specific Checkout Session (unchanged) -------
-        if (sessionId) {
-          const res = await authedFetch(
-            `/api/billing/checkout-session/${encodeURIComponent(sessionId)}`
-          );
-          if (res.status === 401) {
-            router.replace("/login");
-            return;
-          }
-          if (!res.ok) {
-            setState({ kind: "failed" });
-            return;
-          }
-          const data = (await res.json()) as {
-            status: string | null;
-            paymentStatus: string | null;
-          };
-          // A completed Checkout Session reports status "complete". With a
-          // trial, paymentStatus may be "no_payment_required" — completion is
-          // the signal.
-          setState(
-            data.status === "complete" ? { kind: "success" } : { kind: "failed" }
-          );
-          return;
-        }
-
-        // --- Polar: the source of truth is /billing/status. The subscription
-        // row is written by the webhook, which can land a moment after this
-        // redirect, so poll a few times before giving up. ---------------------
+        // The source of truth is /billing/status. The subscription row is
+        // written by the Polar webhook, which can land a moment after this
+        // redirect, so poll a few times before giving up.
         if (checkoutId) {
           for (let attempt = 0; attempt < 6; attempt++) {
             const res = await authedFetch("/api/billing/status");
@@ -82,16 +50,13 @@ export function ReturnClient({
             }
             await sleep(1000);
           }
-          setState({ kind: "failed" });
-          return;
         }
-
         setState({ kind: "failed" });
       } catch {
         setState({ kind: "failed" });
       }
     })();
-  }, [sessionId, checkoutId, router]);
+  }, [checkoutId, router]);
 
   if (state.kind === "loading") {
     return (
