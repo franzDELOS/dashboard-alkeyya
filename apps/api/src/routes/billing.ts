@@ -38,32 +38,58 @@ billingRouter.get("/plans", requireAuth, async (_req: Request, res: Response) =>
   res.status(200).json({ plans });
 });
 
-// GET /billing/status — the current user's billing state. A newly-approved
-// user with no Subscription yet returns subscription: null (expected).
-billingRouter.get("/status", requireAuth, async (req: Request, res: Response) => {
+/**
+ * Build the billing-status payload for a user: pilot flag plus the current
+ * subscription (with the plan fields the UI renders). Shared by GET /status and
+ * POST /polar/reconcile so both return the exact same shape. Returns null when
+ * the user no longer exists (caller should 401).
+ */
+async function buildStatusPayload(userId: string) {
   const user = await prisma.user.findUnique({
-    where: { id: req.userId },
+    where: { id: userId },
     select: {
       isPilotApproved: true,
-      subscription: { include: { plan: { select: { name: true } } } },
+      subscription: {
+        include: {
+          plan: {
+            select: {
+              name: true,
+              monthlyPriceUsd: true,
+              includedCalls: true,
+              overageUnitCents: true,
+            },
+          },
+        },
+      },
     },
   });
-  if (!user) return res.status(401).json({ error: "UNAUTHORIZED" });
+  if (!user) return null;
 
   const sub = user.subscription;
-  return res.status(200).json({
+  return {
     billingProvider: env.BILLING_PROVIDER,
     isPilotApproved: user.isPilotApproved,
     subscription: sub
       ? {
           planName: sub.plan.name,
+          monthlyPriceUsd: sub.plan.monthlyPriceUsd,
+          includedCalls: sub.plan.includedCalls,
+          overageUnitCents: sub.plan.overageUnitCents,
           status: sub.status,
           currentPeriodEnd: sub.currentPeriodEnd,
           trialEndsAt: sub.trialEndsAt,
           cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
         }
       : null,
-  });
+  };
+}
+
+// GET /billing/status — the current user's billing state. A newly-approved
+// user with no Subscription yet returns subscription: null (expected).
+billingRouter.get("/status", requireAuth, async (req: Request, res: Response) => {
+  const payload = await buildStatusPayload(req.userId!);
+  if (!payload) return res.status(401).json({ error: "UNAUTHORIZED" });
+  return res.status(200).json(payload);
 });
 
 // ---- Polar customer routes --------------------------------------------------
@@ -180,6 +206,40 @@ billingRouter.post(
   }
 );
 
+// POST /billing/polar/reconcile — pull the user's LIVE subscription state from
+// Polar and upsert it locally, then return the same shape as GET /billing/status.
+// This makes the UI resilient to webhook delays/failures — and to local dev,
+// where Polar webhooks can't reach us at all. Idempotent and race-safe with the
+// webhook (both key the Subscription row by userId).
+const reconcileSchema = z.object({ checkoutId: z.string().min(1).optional() });
+
+billingRouter.post(
+  "/polar/reconcile",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const parsed = reconcileSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return badRequest(res, parsed.error);
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { id: true, polarCustomerId: true },
+    });
+    if (!user) return res.status(401).json({ error: "UNAUTHORIZED" });
+
+    try {
+      await reconcilePolarSubscription(user, parsed.data.checkoutId ?? null);
+    } catch (err) {
+      // Never fail the request on a reconciliation error — fall through and
+      // return whatever state we currently hold locally.
+      console.error(`[billing] reconcile error for user ${user.id}:`, err);
+    }
+
+    const payload = await buildStatusPayload(user.id);
+    if (!payload) return res.status(401).json({ error: "UNAUTHORIZED" });
+    return res.status(200).json(payload);
+  }
+);
+
 // ---- Admin route ------------------------------------------------------------
 
 // POST /billing/approve-pilot — flips a user to approved so they can subscribe.
@@ -281,9 +341,81 @@ async function resolvePolarUserId(
   return null;
 }
 
+/** True for a Prisma unique-constraint violation (P2002), without importing the
+ *  Prisma error class. Used to resolve the webhook↔reconcile create race. */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "P2002"
+  );
+}
+
+/** Compact error text for logs (Error message, else String(err)). */
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
- * Upsert the Subscription row for a Polar subscription, keyed by userId.
- * subscription.revoked passes statusOverride="suspended".
+ * The single low-level writer for a Polar-backed Subscription row, keyed by
+ * userId. Shared by the webhook and the live reconciliation path so both write
+ * identically. `status` is already mapped to OUR vocabulary by the caller.
+ * Returns true if a row was written (false = no matching Plan for the product).
+ */
+async function persistPolarSubscription(
+  userId: string,
+  fields: {
+    polarSubscriptionId: string;
+    productId: string;
+    status: string;
+    currentPeriodEnd: Date | null;
+    trialEndsAt: Date | null;
+    cancelAtPeriodEnd: boolean;
+  }
+): Promise<boolean> {
+  const plan = await prisma.plan.findUnique({
+    where: { polarProductId: fields.productId },
+  });
+  if (!plan) {
+    console.error(
+      `[billing] no Plan matches Polar product ${fields.productId} (subscription ${fields.polarSubscriptionId}) — skipping`
+    );
+    return false;
+  }
+
+  const data = {
+    planId: plan.id,
+    provider: "polar",
+    polarSubscriptionId: fields.polarSubscriptionId,
+    status: fields.status,
+    currentPeriodEnd: fields.currentPeriodEnd,
+    trialEndsAt: fields.trialEndsAt,
+    cancelAtPeriodEnd: fields.cancelAtPeriodEnd,
+  };
+
+  try {
+    await prisma.subscription.upsert({
+      where: { userId },
+      create: { userId, ...data },
+      update: data,
+    });
+  } catch (err) {
+    // Race: the webhook and a reconcile can upsert the same userId at the same
+    // instant and collide on create. The loser simply retries as an update —
+    // the row now exists, so this is safe and converges to the same state.
+    if (isUniqueViolation(err)) {
+      await prisma.subscription.update({ where: { userId }, data });
+    } else {
+      throw err;
+    }
+  }
+  return true;
+}
+
+/**
+ * Upsert the Subscription row for a Polar webhook subscription payload, keyed by
+ * userId. subscription.revoked passes statusOverride="suspended".
  */
 async function upsertPolarSubscription(
   sub: PolarSubscriptionData,
@@ -301,31 +433,97 @@ async function upsertPolarSubscription(
     return;
   }
 
-  const plan = await prisma.plan.findUnique({
-    where: { polarProductId: sub.productId },
-  });
-  if (!plan) {
-    console.error(
-      `[billing] no Plan matches Polar product ${sub.productId} (subscription ${sub.id}) — skipping`
-    );
-    return;
-  }
-
-  const data = {
-    planId: plan.id,
-    provider: "polar",
+  await persistPolarSubscription(userId, {
     polarSubscriptionId: sub.id,
+    productId: sub.productId,
     status: statusOverride ?? mapPolarStatus(sub.status),
     currentPeriodEnd: sub.currentPeriodEnd ?? null,
     trialEndsAt: sub.trialEnd ?? null,
     cancelAtPeriodEnd: sub.cancelAtPeriodEnd ?? false,
-  };
-
-  await prisma.subscription.upsert({
-    where: { userId },
-    create: { userId, ...data },
-    update: data,
   });
+}
+
+/**
+ * Reconcile a user's subscription with Polar's LIVE state and upsert it locally.
+ * The core of the webhook-independence fix: the UI can render an active plan
+ * even when the webhook is delayed, failed, or (in local dev) never arrives.
+ *
+ * Two sources, tried in order:
+ *  1. customers.getStateExternal(externalId = our user id) — the authoritative
+ *     current state; `activeSubscriptions` holds the trialing/active/past_due
+ *     subscriptions that presently grant access.
+ *  2. checkouts.get(checkoutId) — covers the brief window right after payment
+ *     where customer state can still lag but the checkout already carries the
+ *     new subscription id. Also backfills polarCustomerId if we learned it.
+ *
+ * Returns true if a Subscription row was written. Safe to call repeatedly.
+ */
+async function reconcilePolarSubscription(
+  user: { id: string; polarCustomerId: string | null },
+  checkoutId?: string | null
+): Promise<boolean> {
+  // 1. Authoritative: the customer's live state, keyed by our user id.
+  try {
+    const state = await polar.customers.getStateExternal({
+      externalId: user.id,
+    });
+    const active = state.activeSubscriptions?.[0];
+    if (active) {
+      return await persistPolarSubscription(user.id, {
+        polarSubscriptionId: active.id,
+        productId: active.productId,
+        status: mapPolarStatus(active.status),
+        currentPeriodEnd: active.currentPeriodEnd ?? null,
+        trialEndsAt: active.trialEnd ?? null,
+        cancelAtPeriodEnd: active.cancelAtPeriodEnd ?? false,
+      });
+    }
+  } catch (err) {
+    // 404 = no Polar customer with this externalId yet; fall through to (2).
+    console.warn(
+      `[billing] getStateExternal failed for user ${user.id}: ${describeError(err)}`
+    );
+  }
+
+  // 2. Fallback: the just-completed checkout.
+  if (checkoutId) {
+    try {
+      const checkout = await polar.checkouts.get({ id: checkoutId });
+
+      // Backfill the Polar customer id if we learned it here (best-effort).
+      if (checkout.customerId && !user.polarCustomerId) {
+        await prisma.user
+          .update({
+            where: { id: user.id },
+            data: { polarCustomerId: checkout.customerId },
+          })
+          .catch(() => {});
+      }
+
+      if (
+        (checkout.status === "succeeded" || checkout.status === "confirmed") &&
+        checkout.subscriptionId
+      ) {
+        const full = await polar.subscriptions.get({
+          id: checkout.subscriptionId,
+        });
+        return await persistPolarSubscription(user.id, {
+          polarSubscriptionId: full.id,
+          productId: full.productId,
+          status: mapPolarStatus(full.status),
+          currentPeriodEnd: full.currentPeriodEnd ?? null,
+          trialEndsAt: full.trialEnd ?? null,
+          cancelAtPeriodEnd: full.cancelAtPeriodEnd ?? false,
+        });
+      }
+    } catch (err) {
+      console.warn(
+        `[billing] checkout reconcile failed for ${checkoutId}: ${describeError(err)}`
+      );
+    }
+  }
+
+  return false;
 }
 
 /**

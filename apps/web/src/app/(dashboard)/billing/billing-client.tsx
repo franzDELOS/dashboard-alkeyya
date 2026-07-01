@@ -20,6 +20,9 @@ type Plan = {
 
 type Subscription = {
   planName: string;
+  monthlyPriceUsd: number;
+  includedCalls: number | null;
+  overageUnitCents: number | null;
   status: string;
   currentPeriodEnd: string | null;
   trialEndsAt: string | null;
@@ -31,6 +34,24 @@ type Status = {
   isPilotApproved: boolean;
   subscription: Subscription | null;
 };
+
+// Statuses where the customer has a live Polar billing relationship worth
+// managing (so we show the plan card + "Manage subscription"). A canceled
+// subscription is deliberately excluded: we treat it as "no plan" so the
+// customer sees the catalogue and can subscribe again, and is never shown a
+// dead Manage button pointing at a non-existent portal.
+const CURRENT_STATUSES = new Set([
+  "trialing",
+  "active",
+  "past_due",
+  "suspended",
+]);
+
+function hasCurrentSubscription(status: Status): boolean {
+  return (
+    !!status.subscription && CURRENT_STATUSES.has(status.subscription.status)
+  );
+}
 
 export function BillingClient() {
   const router = useRouter();
@@ -56,11 +77,30 @@ export function BillingClient() {
           setError("We couldn't load your billing details. Please try again.");
           return;
         }
-        const data = (await res.json()) as Status;
+        let data = (await res.json()) as Status;
+
+        // If our DB shows no *current* subscription for an approved user, the
+        // webhook may simply not have landed yet (or, in local dev, can't reach
+        // us). Ask the server to reconcile with Polar's live state before we
+        // conclude there's no plan — this is what keeps a just-subscribed
+        // customer from seeing the "choose a plan" screen again. (A canceled row
+        // isn't "current", so a re-subscribe is picked up here too.)
+        if (data.isPilotApproved && !hasCurrentSubscription(data)) {
+          const rec = await authedFetch("/api/billing/polar/reconcile", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          if (rec.ok) {
+            data = (await rec.json()) as Status;
+          }
+        }
+
         setStatus(data);
 
-        // Only an approved user without a subscription needs the plan catalogue.
-        if (data.isPilotApproved && !data.subscription) {
+        // Only an approved user still without a current subscription needs the
+        // catalogue.
+        if (data.isPilotApproved && !hasCurrentSubscription(data)) {
           const plansRes = await authedFetch("/api/billing/plans");
           if (plansRes.ok) {
             const { plans: list } = (await plansRes.json()) as { plans: Plan[] };
@@ -151,8 +191,8 @@ export function BillingClient() {
     );
   }
 
-  // --- State 3: approved + existing subscription -----------------------------
-  if (status.subscription) {
+  // --- State 3: approved + current subscription ------------------------------
+  if (status.subscription && hasCurrentSubscription(status)) {
     return (
       <BillingShell title="Billing" subtitle="Your Alkeyya subscription.">
         <SubscriptionCard
@@ -240,12 +280,48 @@ function SubscriptionCard({
       <p className="text-xs font-medium uppercase tracking-wider text-slate">
         Current plan
       </p>
-      <h2 className="mt-2 font-display text-2xl text-ink">{sub.planName}</h2>
-      <p className="mt-3 text-sm text-ink">
-        <StatusLine sub={sub} />
-      </p>
+      <div className="mt-2 flex items-baseline justify-between gap-3">
+        <h2 className="font-display text-2xl text-ink">{sub.planName}</h2>
+        <span className="text-lg font-semibold text-ink">
+          {formatPriceUsd(sub.monthlyPriceUsd)}
+        </span>
+      </div>
+
+      <dl className="mt-4 space-y-2 text-sm">
+        <div className="flex justify-between gap-3">
+          <dt className="text-slate">Status</dt>
+          <dd className="text-ink">
+            <StatusLine sub={sub} />
+          </dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-slate">Included calls</dt>
+          <dd className="text-ink">
+            {sub.includedCalls === null
+              ? "Unlimited"
+              : `${sub.includedCalls.toLocaleString()} / mo`}
+          </dd>
+        </div>
+        {sub.overageUnitCents !== null ? (
+          <div className="flex justify-between gap-3">
+            <dt className="text-slate">Overage rate</dt>
+            <dd className="text-ink">
+              {formatOverage(sub.overageUnitCents)} / call
+            </dd>
+          </div>
+        ) : null}
+        {sub.currentPeriodEnd ? (
+          <div className="flex justify-between gap-3">
+            <dt className="text-slate">
+              {sub.cancelAtPeriodEnd ? "Access ends" : "Renews"}
+            </dt>
+            <dd className="text-ink">{formatDate(sub.currentPeriodEnd)}</dd>
+          </div>
+        ) : null}
+      </dl>
+
       {sub.cancelAtPeriodEnd ? (
-        <p className="mt-2 text-sm text-amber">
+        <p className="mt-3 text-sm text-amber">
           Your subscription is set to cancel on {formatDate(sub.currentPeriodEnd)}.
         </p>
       ) : null}
@@ -255,10 +331,15 @@ function SubscriptionCard({
         disabled={portalLoading}
         className={`${buttonClass} mt-6`}
       >
-        {portalLoading ? "Opening…" : "Manage billing"}
+        {portalLoading ? "Opening…" : "Manage subscription"}
       </button>
     </div>
   );
+}
+
+/** Cents → "$0.49" (per-call overage price; always shown to the cent). */
+function formatOverage(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
 /** Human-readable status, mapping our stored status strings to plain language. */

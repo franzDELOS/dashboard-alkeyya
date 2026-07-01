@@ -26,30 +26,35 @@ export function ReturnClient({ checkoutId }: { checkoutId: string | null }) {
 
     (async () => {
       try {
-        // The source of truth is /billing/status. The subscription row is
-        // written by the Polar webhook, which can land a moment after this
-        // redirect, so poll a few times before giving up.
-        if (checkoutId) {
-          for (let attempt = 0; attempt < 6; attempt++) {
-            const res = await authedFetch("/api/billing/status");
-            if (res.status === 401) {
-              router.replace("/login");
+        // Don't wait on the Polar webhook (it can be delayed, and in local dev
+        // can't reach us at all). Instead reconcile against Polar's live state:
+        // POST /billing/polar/reconcile pulls the subscription from Polar,
+        // upserts it, and returns the resulting status. We pass the checkout_id
+        // so it can also resolve the just-completed checkout directly. Retry a
+        // few times to cover the brief lag before Polar marks it active.
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const res = await authedFetch("/api/billing/polar/reconcile", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(checkoutId ? { checkoutId } : {}),
+          });
+          if (res.status === 401) {
+            router.replace("/login");
+            return;
+          }
+          if (res.ok) {
+            const data = (await res.json()) as {
+              subscription: { status: string } | null;
+            };
+            if (
+              data.subscription &&
+              SUBSCRIBED_STATUSES.has(data.subscription.status)
+            ) {
+              setState({ kind: "success" });
               return;
             }
-            if (res.ok) {
-              const data = (await res.json()) as {
-                subscription: { status: string } | null;
-              };
-              if (
-                data.subscription &&
-                SUBSCRIBED_STATUSES.has(data.subscription.status)
-              ) {
-                setState({ kind: "success" });
-                return;
-              }
-            }
-            await sleep(1000);
           }
+          await sleep(1000);
         }
         setState({ kind: "failed" });
       } catch {
