@@ -681,14 +681,20 @@ adminRouter.get("/billing/stats", async (_req: Request, res: Response) => {
       prisma.user.count({ where: { ...NON_ADMIN, subscription: { is: null } } }),
     ]);
 
-  // MRR estimate: sum each active subscriber's CURRENT plan display price. This
-  // is deliberately rough — it ignores grandfathered pricing (a subscriber kept
-  // on an old amount by Polar still counts at the plan's present price).
+  // MRR: sum each active subscriber's GRANDFATHERED price (the amount Polar
+  // actually bills them), captured at subscription time. Legacy rows with no
+  // snapshot fall back to the current plan price.
   const activeSubs = await prisma.subscription.findMany({
     where: { status: "active", user: NON_ADMIN },
-    select: { plan: { select: { monthlyPriceUsd: true } } },
+    select: {
+      priceUsdAtSubscription: true,
+      plan: { select: { monthlyPriceUsd: true } },
+    },
   });
-  const mrrCents = activeSubs.reduce((sum, s) => sum + s.plan.monthlyPriceUsd, 0);
+  const mrrCents = activeSubs.reduce(
+    (sum, s) => sum + (s.priceUsdAtSubscription ?? s.plan.monthlyPriceUsd),
+    0
+  );
 
   res.status(200).json({
     active,

@@ -72,7 +72,9 @@ async function buildStatusPayload(userId: string) {
     subscription: sub
       ? {
           planName: sub.plan.name,
-          monthlyPriceUsd: sub.plan.monthlyPriceUsd,
+          // The grandfathered price the subscriber actually pays, not the current
+          // list price. Legacy rows (null snapshot) fall back to the live plan.
+          monthlyPriceUsd: sub.priceUsdAtSubscription ?? sub.plan.monthlyPriceUsd,
           includedCalls: sub.plan.includedCalls,
           overageUnitCents: sub.plan.overageUnitCents,
           status: sub.status,
@@ -394,10 +396,16 @@ async function persistPolarSubscription(
     cancelAtPeriodEnd: fields.cancelAtPeriodEnd,
   };
 
+  // Grandfathering: capture the plan's CURRENT price only when the row is first
+  // created, so a later admin price change (and the subscription.updated webhook
+  // it never even fires) can't retroactively reprice this subscriber on our side.
+  // Deliberately absent from `update` — the snapshot is immutable once set.
+  const createData = { ...data, priceUsdAtSubscription: plan.monthlyPriceUsd };
+
   try {
     await prisma.subscription.upsert({
       where: { userId },
-      create: { userId, ...data },
+      create: { userId, ...createData },
       update: data,
     });
   } catch (err) {

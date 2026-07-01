@@ -11,6 +11,7 @@ import { AdminProvider } from "./admin-context";
 const NAV = [
   { label: "Overview", href: "/admin" },
   { label: "Users", href: "/admin/users" },
+  { label: "Plans", href: "/admin/plans" },
   { label: "Requests", href: "/admin/requests" },
   { label: "Audit Log", href: "/admin/audit" },
 ] as const;
@@ -24,6 +25,7 @@ function titleFor(pathname: string): string {
     return "Request Detail";
   }
   if (pathname.startsWith("/admin/users")) return "Users";
+  if (pathname.startsWith("/admin/plans")) return "Plans";
   if (pathname.startsWith("/admin/requests")) return "Requests";
   if (pathname.startsWith("/admin/audit")) return "Audit Log";
   return "Admin Overview";
